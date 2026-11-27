@@ -1,0 +1,40 @@
+# rPPG-Toolbox 项目配置（入 git，不含任何密钥）
+# 复制本文件为 config/<新项目>.toml 即可开新项目
+
+[project]
+name      = "rppg"
+repo_url  = "https://github.com/ubicomplab/rPPG-Toolbox.git"
+repo_name = "rPPG-Toolbox"
+
+# ---------------------------------------------------------------- 依赖探针
+# 只写两类包：
+#   1) Colab 不预装的（否则探针恒为"已安装"，等于没探）
+#   2) 版本敏感的（例如 opencv 必须是 4.10，而 Colab 预装 5.0）
+# 值 = 期望版本前缀；空字符串表示"只要装了就行"
+[deps]
+yacs                  = ""
+neurokit2             = ""
+opencv-python-headless = "4.10"
+
+# 可选：额外命令（在仓库目录下执行）
+# commands = ["python -m pip install -q -e ."]
+
+# ---------------------------------------------------------------- 数据
+# 每个数据集一条 [[data]]；bootstrap 会看 manifest 决定要不要下载
+[[data]]
+source = "kaggle"
+slug   = "OWNER/SLUG_A"          # ← 待填：Kaggle notebook 里 !ls /kaggle/input 的输出
+tag    = "v1"
+check  = "**/subject*_vid.avi"
+count  = 42
+
+# [[data]]
+# source = "kaggle"
+# slug   = "OWNER/SLUG_B"
+# tag    = "v1"
+
+# [[data]]
+# source = "hf"
+# repo   = "your-name/ubfc-processed"
+# revision = ""                  # 留空跟 main；填 sha 可钉版本
+# repo_type = "dataset"

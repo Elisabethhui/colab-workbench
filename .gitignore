@@ -12,6 +12,12 @@ runs/*
 __pycache__/
 *.py[cod]
 
+# 凭据：永不进 git
+secrets.toml
+_secrets/
+kaggle.json
+.env
+
 # 数据与模型（放 Drive，不进 git）
 *.npz
 *.npy

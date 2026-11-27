@@ -75,15 +75,36 @@ scripts/nb_errors.py runs/<某次输出>.ipynb
 
 `colab_run_nb.sh` 已经自动把 `*_output.ipynb` 移进 `runs/` 并跑完这一步，直接看它打印的 traceback。
 
+## 环境契约：第 0 格（最重要的一条）
+
+每个 notebook 的**第一格是环境格**，内容固定（见 `MANUAL.md` 附录 A、`projects/_template/00_template.ipynb`）：
+
+```python
+from bootstrap import setup
+ctx = setup("<项目名>")   # 项目名 = config/<项目名>.toml
+```
+
+`bootstrap.setup()` 幂等地完成：挂 Drive → 判新 VM → 建目录 → 载凭据（脱敏）→ clone/pull 上游代码
+→ 装依赖 + 打补丁 → 备数据（看 manifest）→ 写哨兵 → 打印硬件。
+
+**Agent 的硬规则：**
+
+1. **永不修改第 0 格。** 需要额外的环境动作，写进 `projects/<name>/hooks.py`，不要往第 0 格塞代码。
+2. **业务格只用 `ctx.paths.*`**：`repo`（随 VM 消失）/ `data`（Drive）/ `logs` / `outputs`（Drive）/ `cache`（本地盘）。禁止裸写 `/content/...` 路径常量。
+3. **新增依赖**：改 `config/<name>.toml` 的 `[deps]` 探针（只写**镜像里没有的**或**版本敏感的**包；写 `einops` 这种预装包等于没探），复杂逻辑写进 `hooks.install()`。
+4. **新增数据**：只加一条 `[[data]]`（`source/slug/tag/check/count`），不要写下载代码。下载逻辑归 bootstrap。
+5. **打补丁**必须带幂等标记：`_patch(...)` 用 `marker` 判「已打过」，重复执行不得改变文件。
+6. 大文件 → `ctx.paths.outputs`；临时 → `ctx.paths.cache`；代码 → 只在 `ctx.paths.repo`，且不提交。
+
 ## 写 notebook 的硬规则
 
-1. **一份 notebook，本地与 Colab 都能跑**：路径必须走 `RUN_ENV` / `os.environ` 判断，禁止裸写 `/content`
-2. 装包用 `%pip`，不要用 `!pip`（`!pip` 装的包不作用于当前内核）
-3. **不要把密钥写进 notebook**：用 `userdata.get('KEY')` 或 `os.environ`
-4. 每个 notebook 顶部保留一格「环境自检」（Python 版本、GPU、关键包版本、磁盘），新增依赖要同步加进去
-5. 长任务的产物必须落盘到 Drive 或下载回来，VM 回收后 `/content` 是空的
-6. 大对象不要 `print` 全量（DataFrame 用 `.head()`，图用 `display()`，数组用 shape/dtype）
-7. 判断命令失败用 `subprocess.run(..., check=True)`；IPython 的 `!cmd` **不会**在非零退出时报错
+1. 装包用 `%pip`，不要用 `!pip`（`!pip` 装的包不作用于当前内核）——但**常规依赖应走 config，不要手装**
+2. **不要把密钥写进 notebook**：凭据只来自 Drive 的 `secrets.toml`，由第 0 格注入环境变量
+3. 不要用 Colab Secrets（`userdata.get`）：VS Code / CLI 通道下必抛 `Secrets can only be fetched when running from the Colab UI`
+4. 长任务的产物必须落盘到 `ctx.paths.outputs`（Drive），VM 回收后 `/content` 是空的
+5. 大对象不要 `print` 全量（DataFrame 用 `.head()`，图用 `display()`，数组用 shape/dtype）
+6. 判断命令失败用 `subprocess.run(..., check=True)`；IPython 的 `!cmd` **不会**在非零退出时报错
+7. 换硬件（CPU↔GPU）后**只重跑第 0 格**，不要改代码去适配「新环境」
 
 ## 产物归属
 
