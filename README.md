@@ -40,8 +40,20 @@ AGENTS.md                agent 必读的全局规则（Pi / Codex / opencode 共
 projects/_template/      新项目模板
 projects/<name>/         你的项目
 runs/                    执行输出（git 忽略）
-scripts/                 colab_up.sh / colab_run_nb.sh / nb_errors.py / new-project.sh
+scripts/                 colab_up.sh / colab_run_nb.sh / sessions.py / nb_errors.py / new-project.sh
 ```
+
+## session 预览与清理
+
+```bash
+./scripts/sessions.py                  # 预览所有 runtime（分类：CLI 管理 / 其他客户端）
+./scripts/sessions.py stop <name|all>  # 清理 CLI 管理的 session
+./scripts/sessions.py stop all         # 全清
+```
+
+CLI 只能操作自己创建的 session（本地 `~/.config/colab-cli/sessions.json` 里存有该 runtime 的 JWT）。
+VS Code 扩展创建的 runtime 会以 `[?]` 形式出现，`sessions.py` 会交叉比对 VS Code 的 Jupyter 内核缓存，
+标出它的区域 / 内核 id / 最后活动时间。处理它只能去 Colab 网页 `Runtime → Manage sessions`，或在 VS Code 断开内核。
 
 ## 常见坑
 
@@ -51,3 +63,5 @@ scripts/                 colab_up.sh / colab_run_nb.sh / nb_errors.py / new-proj
 | notebook 里 `drive.mount()` 卡住 | 交互授权，agent 无法完成 | 人先跑 `colab drivemount -s <session>` |
 | `colab exec` 中途断开但任务像还在跑 | websocket 断了，远端内核仍存活 | `colab status -s <session>` / `colab log -s <session> -n 40`，别急着重跑 |
 | `colab sessions` 出现 `[?]` 条目 | 那是别的客户端（如 VS Code 扩展）创建的 runtime，CLI 没有它的 JWT | CLI 无法接管；不用的在 Colab 网页 Manage sessions 里终止 |
+| CLI 的 session 一小时不到就没了 | CLI 是 fire-and-forget，跑完就断连接，Colab 按活动度回收 | 正常现象，`colab_up.sh` 重建约 4 秒；需要长活用 `sessions.py keepalive` |
+| `colab: command not found`（在 VS Code 扩展 / agent 工具里） | 扩展宿主不读 `.zshrc`，最小 PATH 没有 `~/.local/bin` | 已软链到 `/opt/homebrew/bin/colab`；换机器重做一次 |

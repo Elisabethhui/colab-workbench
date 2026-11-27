@@ -27,6 +27,10 @@ scripts/                执行与诊断脚本
 ## 执行规范
 
 ```bash
+scripts/sessions.py                        # 预览：CLI 管理的 session + 其他客户端的 runtime
+scripts/sessions.py stop <name|all>        # 清理（只对 CLI 管理的有效）
+scripts/sessions.py keepalive <name> --interval 300   # 保活（免费档慎用）
+
 scripts/colab_up.sh <session> [--gpu T4]        # 确保 session 存在（幂等）
 scripts/colab_run_nb.sh projects/<name>/x.ipynb [session]   # 跑 notebook + 抽错误
 ```
@@ -43,7 +47,25 @@ colab exec -s <session> -f <notebook> # 逐格执行，遇首个非零 cell 停�
 - shell 命令用一次性形式：`colab ssh -s <session> -- <cmd>`，或 `echo '!<cmd>' | colab exec -s <session>`
 - 用完必须 `colab stop -s <session>`；空闲的 GPU 会烧掉每日免费时长
 
-## 读错误（省 token）
+## session 生命周期（必读）
+
+- **Colab 按活动度保活。** CLI 是 fire-and-forget：`colab exec` 跑完就断开 websocket，
+  随后**零连接、零活动 → 后端会回收 VM**（实测空闲不到 1 小时就没了）。
+- 对比：VS Code 的 Colab 扩展会**保持一个常驻的 kernel 连接**，所以它的 runtime 看起来“一直都在”。
+  这不是 CLI 不行，是两种客户端的连接模型不同。
+- **重建成本极低**（`colab new` 约 4 秒），所以默认策略是「断了就重开」，不要花力气抢救。
+- `scripts/sessions.py keepalive` 可以定时打心跳续命，但免费档靠挂机保活属于灰色地带，慎用。
+- `colab sessions` 里带 `[?]` 的条目是别的客户端（如 VS Code 扩展）创建的 runtime：服务端有分配，
+  但 CLI 没有它的 JWT，`stop` / `exec` / `status` 一律 not found。**这是设计，不是 bug**，用 `sessions.py list` 看它的真身。
+
+## 环境注意事项
+
+- `colab` 安装在 `~/.local/bin/colab`，并已软链到 `/opt/homebrew/bin/colab`。
+  **原因**：VS Code 的扩展宿主不读 `.zshrc`，最小 PATH 里没有 `~/.local/bin`，
+  软链之后 agent 的 bash 工具和 `@pi` RPC 子进程才稳定找得到 `colab`。换机器要重做这条软链。
+- 判断 session 是否存不存在，**不要看 `colab status` 的退出码**（not found 也返回 0），
+  解析 `colab sessions` 的 `[name]` 前缀，见 `scripts/sessions.py`。
+
 
 `colab exec -f x.ipynb` 会把结果写成同目录的 `x_output.ipynb`。**不要整本读那个 JSON**，用：
 
