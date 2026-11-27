@@ -417,15 +417,31 @@ def _manifest_ok(d: Path, spec: Dict[str, Any]) -> bool:
         import glob as _glob
         n = len(_glob.glob(str(d / "**" / check), recursive=True))
         want = spec.get("count")
+        if n == 0:
+            # manifest 在但一个文件都没有：上一次下载其实失败了，绝不能当成就绪
+            print(f"                 manifest 存在但 {check} 命中 0 个文件 → 视为未就绪")
+            return False
         if want is not None and n < int(want):
             print(f"                 manifest 存在但只有 {n}/{want} 个文件 → 视为未就绪")
             return False
-    return True
+        return True
+    # 没有 check 规则时，至少要有非 manifest 的文件
+    return _nfiles(d) > 0
 
 
-def _write_manifest(d: Path, spec: Dict[str, Any]) -> None:
-    import glob as _glob
-    files = sum(1 for p in d.rglob("*") if p.is_file())
+def _nfiles(d: Path) -> int:
+    """目录里真实文件数（不含 .manifest.json）。"""
+    if not d.is_dir():
+        return 0
+    return sum(1 for p in d.rglob("*") if p.is_file() and p.name != ".manifest.json")
+
+
+def _write_manifest(d: Path, spec: Dict[str, Any]) -> bool:
+    """只有真的落地了文件才写 manifest。返回是否写入。"""
+    files = _nfiles(d)
+    if files == 0:
+        print("                 ✗ 目录里 0 个文件，拒绝写 manifest（否则会被当成已就绪永久跳过）")
+        return False
     entry = {
         "source": spec.get("source"),
         "id": spec.get("slug") or spec.get("repo"),
@@ -439,6 +455,7 @@ def _write_manifest(d: Path, spec: Dict[str, Any]) -> None:
     reg = d.parent.parent / "registry.jsonl"
     with reg.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return True
 
 
 def fetch_data(spec: Dict[str, Any], dest: Path) -> bool:
@@ -540,16 +557,28 @@ def prepare_data(cfg: Dict[str, Any], ctx: "Ctx", hooks: Any) -> None:
         if hooks and hasattr(hooks, "prepare"):
             hooks.prepare(ctx)
         return
+    failed = []
     for spec in need_download:
         d = _data_dir(ctx.paths.data, spec)
-        print(f"  数据          下载 {spec.get('source')}:{spec.get('slug') or spec.get('repo')} → {d}")
-        if fetch_data(spec, d):
-            _write_manifest(d, spec)
-            print("                 完成")
-    for spec in specs:  # 补齐缺失的 manifest
+        name = f"{spec.get('source')}:{spec.get('slug') or spec.get('repo')}"
+        print(f"  数据          下载 {name} → {d}")
+        ok = False
+        try:
+            ok = fetch_data(spec, d) and _write_manifest(d, spec)
+        except Exception as exc:  # noqa: BLE001
+            print(f"                 ✗ 异常 {type(exc).__name__}: {str(exc)[:300]}")
+        if ok:
+            print(f"                 完成，{_nfiles(d)} 个文件已落 Drive")
+        else:
+            failed.append(name)
+    for spec in specs:  # 只给"真有文件但没有 manifest"的目录补 manifest
         d = _data_dir(ctx.paths.data, spec)
-        if d.exists() and not (d / ".manifest.json").exists():
+        if d.exists() and not (d / ".manifest.json").exists() and _nfiles(d) > 0:
             _write_manifest(d, spec)
+
+    if failed:
+        print(f"  ⚠ 数据        {len(failed)} 个数据集未就绪：{', '.join(failed)}")
+        print("                 下一步重跑本格即可重试；401/403 请检查 Drive/_secrets/kaggle.json")
 
     if hooks and hasattr(hooks, "prepare"):
         hooks.prepare(ctx)
