@@ -113,25 +113,21 @@ def patch(ctx):
 
 # ------------------------------------------------------------------ 数据后处理
 def prepare(ctx):
-    """数据已在 bootstrap 里就位（dest=vm 落本地盘 / dest=drive 落 Drive）；这里只做"拼视图"：
+    """数据已在 bootstrap 里下载到 Drive；这里只做"拼视图"：
     用符号链接把各个 subject 目录拼成工具要的 /tmp/UBFC（本地盘支持软链，Drive 不支持）。"""
     import bootstrap  # 自己
 
-    # 两个可能的落点都扫：dest=vm → 本地盘；dest=drive → Drive
-    roots = [bootstrap.DATA_LOCAL_ROOT / 'kaggle', ctx.paths.data / 'kaggle']
-    vids, seen = [], set()
-    for root in roots:
-        for d in sorted(root.glob('*/')):
-            for v in sorted(glob.glob(str(d / '**' / 'subject*_vid.avi'), recursive=True)):
-                if v not in seen:
-                    seen.add(v)
-                    vids.append(v)
+    # 数据只在 Drive 上
+    root = ctx.paths.data / 'kaggle'
+    vids = []
+    for d in sorted(root.glob('*/')):
+        vids += sorted(glob.glob(str(d / '**' / 'subject*_vid.avi'), recursive=True))
     view = bootstrap.VMLOCAL / 'UBFC'
     view.mkdir(parents=True, exist_ok=True)
 
     if not vids:
-        print('  数据          ⚠ 没找到 subject*_vid.avi')
-        print(f'                扫过 {roots[0]} 和 {roots[1]}')
+        print('  数据          ⚠ Drive 里没找到 subject*_vid.avi')
+        print(f'                检查 {root}')
         return
     built = 0
     for v in vids:

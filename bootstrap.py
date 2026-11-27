@@ -37,8 +37,7 @@ except ModuleNotFoundError:  # pragma: no cover
 VMLOCAL = Path(os.environ.get("WB_VMLOCAL", "/content"))      # 本地盘：随 VM 生灭
 DRIVE_ROOT = Path(os.environ.get("WB_DRIVE_ROOT", "/content/drive/MyDrive"))
 SENTINEL_DIR = VMLOCAL / ".wb"
-CACHE_DIR = VMLOCAL / "_cache"
-DATA_LOCAL_ROOT = CACHE_DIR / "data"      # dest="vm" 的数据落点：本地盘，随 VM 生灭
+CACHE_DIR = VMLOCAL / "_cache"                   # 只放暂存/杂项，绝不放数据集
 WB_HOME = Path(__file__).resolve().parent                       # 工作流仓库根
 
 INTERACTIVE = sys.stdin.isatty() or bool(os.environ.get("WB_INTERACTIVE"))
@@ -364,11 +363,6 @@ def _data_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [raw] if isinstance(raw, dict) else list(raw)
 
 
-def _dest_root(drive_data: Path, spec: Dict[str, Any]) -> Path:
-    """数据集落到哪：Drive（小数据，跨 VM 复用）还是 VM 本地盘（大数据，每次重下）。"""
-    return DATA_LOCAL_ROOT if str(spec.get("dest", "drive")) == "vm" else drive_data
-
-
 def _data_dir(root: Path, spec: Dict[str, Any]) -> Path:
     src = spec.get("source", "local")
     if src == "kaggle":
@@ -420,66 +414,89 @@ def _write_manifest(d: Path, spec: Dict[str, Any]) -> None:
 
 
 def fetch_data(spec: Dict[str, Any], dest: Path) -> bool:
+    """把数据集直接写进 Drive 的 dest 目录。
+
+    硬约束（用户定的目标）：数据只进 Google Drive，不在 /content 留存。
+    技术约束：Drive 的 FUSE 不支持符号链接，所以两个官方通道都必须走
+    「直落模式」，不能走它们默认的 symlink 缓存：
+        kaggle → kagglehub.dataset_download(..., output_dir=dest)
+        hf     → snapshot_download(..., local_dir=dest)
+    下载过程中的压缩包临时文件必然会在本地盘停留一会儿（流式解压），
+    跑完由 _clean_kaggle_temp() 清掉，数据集本体一个字节都不留在本地。
+    """
     src = spec.get("source")
-    staging = CACHE_DIR / "staging" / dest.name
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
+    dest.mkdir(parents=True, exist_ok=True)
 
     if src == "kaggle":
         slug = spec["slug"]
-        print(f"                 kagglehub.dataset_download({slug!r})")
-        # 官方通道 kagglehub：公开数据集免登录，自带版本缓存与解压
-        os.environ.setdefault("KAGGLEHUB_CACHE", str(CACHE_DIR / "kagglehub"))
+        print(f"                 kagglehub.dataset_download({slug!r}) → {dest}")
         try:
             import kagglehub  # noqa: PLC0415
         except ModuleNotFoundError:
             sh([sys.executable, "-m", "pip", "install", "-q", "kagglehub"], check=True)
             import kagglehub  # noqa: PLC0415
+
+        # 压缩包的临时落脚点放本地盘（必须的临时文件），数据集本体直落 Drive
+        os.environ["KAGGLEHUB_CACHE"] = str(CACHE_DIR / "kagglehub")
         try:
+            kagglehub.dataset_download(slug, force_download=False, output_dir=str(dest))
+        except TypeError:
+            # 老版本 kagglehub 没有 output_dir：缓存模式会建 symlink，Drive 上必然失败，
+            # 所以缓存放本地、解引用后搬到 Drive（仅此一条退路）
+            print("                 ⚠ 这个 kagglehub 版本没有 output_dir，改走「本地暂存 → 搬 Drive」")
             got = Path(kagglehub.dataset_download(slug, force_download=False))
+            staging = CACHE_DIR / "staging" / dest.name
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(parents=True, exist_ok=True)
+            for item in got.iterdir():
+                dst = staging / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dst, symlinks=False, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, dst)
+            for item in staging.iterdir():
+                target = dest / item.name
+                if not target.exists():
+                    shutil.move(str(item), str(target))
+            shutil.rmtree(staging, ignore_errors=True)
         except Exception as exc:  # noqa: BLE001
             print(f"                 ✗ 失败 {type(exc).__name__}: {str(exc)[:200]}")
-            print("                   401/403 = 数据集私有或未接受规则 → 填 _secrets/secrets.toml")
+            print("                   401/403 = 数据集私有或没接受规则 → 填 Drive/_secrets/kaggle.json")
+            _clean_kaggle_temp()
             return False
-        # kagglehub 缓存里是符号链接；Drive 不支持软链，必须解引用成真实文件
-        for item in got.iterdir():
-            dst = staging / item.name
-            if item.is_dir():
-                shutil.copytree(item, dst, symlinks=False, dirs_exist_ok=True)
-            else:
-                shutil.copy2(item, dst)
-        print(f"                 已取 {got.name} → 暂存 {sum(1 for _ in staging.rglob('*'))} 项")
-        if spec.get("prune_archive", True):
-            # 解压后的 avi 已经是原包的数倍；留着 1.archive 会白吃一块本地盘
-            freed = 0
-            for arc in (CACHE_DIR / "kagglehub").rglob("*.archive"):
-                try:
-                    freed += arc.stat().st_size
-                    arc.unlink()
-                except OSError:
-                    pass
-            if freed:
-                print(f"                 已删掉压缩包缓存，释放 {freed / 2**30:.1f} GB 本地盘")
+        _clean_kaggle_temp()
+
     elif src == "hf":
         from huggingface_hub import snapshot_download  # noqa: PLC0415
+        # local_dir 模式：直接写目标目录，不建 blobs/snapshots 软链
         snapshot_download(repo_id=spec["repo"], revision=spec.get("revision"),
                           repo_type=spec.get("repo_type", "dataset"),
-                          local_dir=str(staging))
+                          local_dir=str(dest))
     elif src == "url":
-        sh(["curl", "-fL", spec["url"], "-o", str(staging / (spec.get("filename") or "download")), ],
+        sh(["curl", "-fL", spec["url"], "-o", str(dest / (spec.get("filename") or "download"))],
            check=True)
     else:
         print(f"                 跳过未知 source={src}")
         return False
-
-    dest.mkdir(parents=True, exist_ok=True)
-    for item in staging.iterdir():
-        target = dest / item.name
-        if target.exists():
-            continue
-        shutil.move(str(item), str(target))
-    shutil.rmtree(staging, ignore_errors=True)
     return True
+
+
+def _clean_kaggle_temp() -> None:
+    """删掉 kagglehub 留在本地盘的压缩包/解压临时文件（数据集本体已经在 Drive 了）。"""
+    cache = CACHE_DIR / "kagglehub"
+    if not cache.exists():
+        return
+    freed = 0
+    for p in cache.rglob("*"):
+        if p.is_file() and p.suffix in (".archive", ".zip", ".tar", ".gz"):
+            try:
+                freed += p.stat().st_size
+                p.unlink()
+            except OSError:
+                pass
+    shutil.rmtree(cache, ignore_errors=True)
+    if freed:
+        print(f"                 已清掉本地临时包 {freed / 2**30:.1f} GB（数据本体只在 Drive）")
 
 
 def prepare_data(cfg: Dict[str, Any], ctx: "Ctx", hooks: Any) -> None:
@@ -489,23 +506,20 @@ def prepare_data(cfg: Dict[str, Any], ctx: "Ctx", hooks: Any) -> None:
         if hooks and hasattr(hooks, "prepare"):
             hooks.prepare(ctx)
         return
-    need_download = [s for s in specs
-                     if not _manifest_ok(_data_dir(_dest_root(ctx.paths.data, s), s), s)]
+    need_download = [s for s in specs if not _manifest_ok(_data_dir(ctx.paths.data, s), s)]
     if not need_download:
-        where = {"vm": "VM 本地盘", "drive": "Drive"}
-        tags = "/".join(sorted({where.get(str(s.get("dest", "drive")), "?") for s in specs}))
-        print(f"  数据          {len(specs)} 个数据集在{tags}已就绪（0 次网络请求）")
+        print(f"  数据          {len(specs)} 个数据集已在 Drive 就绪（0 次网络请求）")
         if hooks and hasattr(hooks, "prepare"):
             hooks.prepare(ctx)
         return
     for spec in need_download:
-        d = _data_dir(_dest_root(ctx.paths.data, spec), spec)
+        d = _data_dir(ctx.paths.data, spec)
         print(f"  数据          下载 {spec.get('source')}:{spec.get('slug') or spec.get('repo')} → {d}")
         if fetch_data(spec, d):
             _write_manifest(d, spec)
             print("                 完成")
     for spec in specs:  # 补齐缺失的 manifest
-        d = _data_dir(_dest_root(ctx.paths.data, spec), spec)
+        d = _data_dir(ctx.paths.data, spec)
         if d.exists() and not (d / ".manifest.json").exists():
             _write_manifest(d, spec)
 

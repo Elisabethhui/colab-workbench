@@ -182,10 +182,21 @@ repo_type = "dataset"
 
 ```
 manifest 存在 且 count 达标  →  跳过，0 次网络请求
-否则                          →  下载到本地暂存 → 搬进 Drive → 写 manifest + 追加 registry.jsonl
+否则                          →  直接下载进 Drive → 写 manifest + 追加 registry.jsonl
 ```
 
-**为什么下载要先落本地盘再搬？** Kaggle 直接解压到 Drive 时，42 个视频几千次小写入，在 FUSE 上会慢到怀疑人生甚至中断。
+**数据落点（硬规则，别改）**：数据集**只进 Google Drive**，`Colab_Projects/_data/kaggle/<owner>__<slug>`，
+`/content` 上不留任何数据集文件。
+
+实现方式（因为 Drive 的 FUSE **不支持符号链接**，两个官方通道的默认缓存模式都会建软链、必然失败）：
+
+| 通道 | 调用 | 为什么这么写 |
+|---|---|---|
+| Kaggle | `kagglehub.dataset_download(slug, output_dir=<Drive 路径>)` | `output_dir` = 直落模式，不建 `versions/` 软链 |
+| Hugging Face | `snapshot_download(repo, local_dir=<Drive 路径>)` | `local_dir` = 直落模式，不建 `blobs/snapshots` 软链 |
+
+唯一的例外是**下载途中的压缩包临时文件**：15.4G 的 `1.archive` 必须先落到本地盘才能边下边解，
+解压完 `_clean_kaggle_temp()` 立刻删掉。这不叫"存在本地"，是流式传输的必经缓冲区。
 
 **核验**：
 ```bash

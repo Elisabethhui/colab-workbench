@@ -90,11 +90,15 @@ ctx = setup("<项目名>")   # 项目名 = config/<项目名>.toml
 **Agent 的硬规则：**
 
 1. **永不修改第 0 格。** 需要额外的环境动作，写进 `projects/<name>/hooks.py`，不要往第 0 格塞代码。
-2. **业务格只用 `ctx.paths.*`**：`repo`（随 VM 消失）/ `data`（Drive）/ `logs` / `outputs`（Drive）/ `cache`（本地盘）。禁止裸写 `/content/...` 路径常量。
-3. **新增依赖**：改 `config/<name>.toml` 的 `[deps]` 探针（只写**镜像里没有的**或**版本敏感的**包；写 `einops` 这种预装包等于没探），复杂逻辑写进 `hooks.install()`。
-4. **新增数据**：只加一条 `[[data]]`（`source/slug/tag/check/count`），不要写下载代码。下载逻辑归 bootstrap。
-5. **打补丁**必须带幂等标记：`_patch(...)` 用 `marker` 判「已打过」，重复执行不得改变文件。
-6. 大文件 → `ctx.paths.outputs`；临时 → `ctx.paths.cache`；代码 → 只在 `ctx.paths.repo`，且不提交。
+2. **数据只进 Drive（铁律）**：数据集/缓存/模型权重一律落 `ctx.paths.data`（Drive），
+   **禁止**把数据集下载到 `/content`、`~`、`/tmp` 等本地盘位置。Colab 本地盘只配放
+   「随 VM 生灭的代码与临时文件」。实现必须走直落模式（kaggle `output_dir` / hf `local_dir`），
+   因为 Drive 不支持符号链接；仅允许压缩包在本地停留（流式解压所需的临时缓冲，解压完立即删）。
+3. **业务格只用 `ctx.paths.*`**：`repo`（随 VM 消失）/ `data`（Drive）/ `logs` / `outputs`（Drive）/ `cache`（本地盘）。禁止裸写 `/content/...` 路径常量。
+4. **新增依赖**：改 `config/<name>.toml` 的 `[deps]` 探针（只写**镜像里没有的**或**版本敏感的**包；写 `einops` 这种预装包等于没探），复杂逻辑写进 `hooks.install()`。
+5. **新增数据**：只加一条 `[[data]]`（`source/slug/tag/check`），不要写下载代码。下载逻辑归 bootstrap。
+6. **打补丁**必须带幂等标记：`_patch(...)` 用 `marker` 判「已打过」，重复执行不得改变文件。
+7. 大文件 → `ctx.paths.outputs`；临时 → `ctx.paths.cache`；代码 → 只在 `ctx.paths.repo`，且不提交。
 
 ## 写 notebook 的硬规则
 
