@@ -44,7 +44,9 @@ CACHE_ROOT = DRIVE_ROOT / DRIVE_SUB / "cache"    # 外部数据原件（kaggle/h
 PROJECTS_ROOT = DRIVE_ROOT / DRIVE_SUB / "projects"   # 项目产物（logs/outputs）
 WB_HOME = Path(__file__).resolve().parent                       # 工作流仓库根
 
-INTERACTIVE = sys.stdin.isatty() or bool(os.environ.get("WB_INTERACTIVE"))
+# 注意：不要用 sys.stdin.isatty() 判断"能不能弹授权"。
+# VS Code 的 notebook 内核照样没有 TTY，但它**支持** stdin 弹窗；
+# 唯一可靠的办法是真的去挂，挂不动再翻译异常（见 mount_drive）。
 
 
 # ------------------------------------------------------------------ 小工具
@@ -171,18 +173,31 @@ def mount_drive() -> bool:
         DRIVE_ROOT.mkdir(parents=True, exist_ok=True)
         return True
 
-    if not INTERACTIVE:
+    # 不做"是否交互"的预先猜测：VS Code 的 notebook 内核同样没有 TTY，
+    # 但它**支持** stdin 弹窗，所以直接试着挂，挂不动再把原因翻译清楚。
+    print("  Drive         挂载中（会自动弹一次 Google 授权）...")
+    try:
+        from google.colab import drive  # noqa: PLC0415  (只在 Colab 里存在)
+    except ImportError:
         raise RuntimeError(
-            "Drive 未挂载，且当前不是交互环境（CLI exec 无法弹授权）。\n"
-            "  二选一：\n"
-            "    1) 在 VS Code 里点运行这一格（会弹一次授权）\n"
-            "    2) 先执行: colab drivemount -s <session>\n"
-            "  拒绝继续：否则数据会静默落进 Colab 本地盘，这是明确禁止的。"
-        )
+            "这不是 Colab 环境，没有 google.colab.drive。\n"
+            "  本地调试请设 WB_SKIP_DRIVE=1；正常使用请在 Colab / VS Code(Colab 内核) 里跑。"
+        ) from None
 
-    print("  Drive         挂载中（浏览器会弹一次授权）...")
-    from google.colab import drive  # noqa: PLC0415  (只在 Colab 里存在)
-    drive.mount("/content/drive")
+    mountpoint = DRIVE_ROOT.parent if DRIVE_ROOT.name == "MyDrive" else DRIVE_ROOT
+    try:
+        drive.mount(str(mountpoint))
+    except Exception as exc:  # noqa: BLE001
+        kind = type(exc).__name__
+        if kind in ("StdinNotImplementedError", "EOFError", "OSError", "BrokenPipeError"):
+            raise RuntimeError(
+                f"Drive 未挂载，而这条通道没有输入通道（{kind}），弹不出授权。\n"
+                "  colab exec / 后台脚本属于这种；解决方法二选一：\n"
+                "    1) 在 VS Code 的 notebook 里点运行这一格（会弹授权窗）\n"
+                "    2) 先在这个 session 上手动执行: colab drivemount -s <session>\n"
+                "  拒绝继续：否则数据会静默落进 Colab 本地盘，这是明确禁止的。"
+            ) from None
+        raise
 
     for _ in range(20):  # FUSE 挂载有几百毫秒延迟
         if _drive_mounted():
