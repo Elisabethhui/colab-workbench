@@ -9,7 +9,7 @@
 | # | 谁做 | 做什么 | 做完的标志 |
 |---|---|---|---|
 | ① | **你** | 在 GitHub 建一个 **public** 仓库 `colab-workbench`，把这个目录推上去 | `git remote -v` 有地址，网页能打开 |
-| ② | **你** | 第 0 格里的 `github.com/<你的账号>/colab-workbench.git` 改成真实地址（只改一次） | 模板 notebook 里没有 `<你的账号>` 字样 |
+| ② | **你** | 第 0 格里的 `github.com/Elisabethhui/colab-workbench.git` 改成真实地址（只改一次） | 模板 notebook 里没有 `<你的账号>` 字样 |
 | ③ | **你** | Drive 建 `MyDrive/Colab_Projects/`，把 `secrets.example.toml` 改名 `secrets.toml` 填好，放到 `MyDrive/Colab_Projects/_secrets/` | 该文件在 Drive 里能看到 |
 | ④ | **你** | Kaggle 网页 → 任一数据集 → 「Copy API command」里那行 `kaggle datasets download -d X/Y`，把 `X/Y` 给我（两个数据集各一个） | `config/rppg.toml` 里的 `OWNER/SLUG_A` 变成真值 |
 | ⑤ | **我** | 把仓库推到 GitHub 前跑一遍 `gitleaks detect`，确认没有密钥漏进去 | 输出 `no leaks found` |
@@ -253,7 +253,7 @@ from pathlib import Path
 repo = Path("/content/colab-workbench")
 if not repo.exists():
     subprocess.run(["git", "clone", "-q",
-        os.environ.get("WB_REPO", "https://github.com/<你的账号>/colab-workbench.git"),
+        "https://github.com/Elisabethhui/colab-workbench.git",
         str(repo)], check=True)
 else:
     subprocess.run(["git", "-C", str(repo), "pull", "-q"], check=False)
