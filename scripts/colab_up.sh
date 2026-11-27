@@ -25,12 +25,18 @@ done
 [[ -z "$SESSION" ]] && { echo "用法: $0 <session> [--gpu T4]" >&2; exit 2; }
 command -v colab >/dev/null || { echo "colab CLI 未安装: uv tool install google-colab-cli" >&2; exit 2; }
 
-if [[ $RESTART -eq 1 ]] && colab status -s "$SESSION" >/dev/null 2>&1; then
+# 注意: `colab status -s X` 在 session 不存在时**退出码仍是 0**（只打印 not found），
+# 所以必须解析 `colab sessions` 的 `[name]` 前缀来判断。
+session_exists() {
+  colab sessions 2>/dev/null | awk -v want="[$SESSION]" '$1 == want { found = 1 } END { exit !found }'
+}
+
+if [[ $RESTART -eq 1 ]] && session_exists; then
   echo "[up] 重启 $SESSION 的内核..."
   colab restart-kernel -s "$SESSION"
 fi
 
-if colab status -s "$SESSION" >/dev/null 2>&1; then
+if session_exists; then
   echo "[up] session '$SESSION' 已存在:"
   colab status -s "$SESSION"
   exit 0

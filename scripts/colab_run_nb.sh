@@ -31,8 +31,13 @@ PROJECT="$(basename "$(dirname "$NOTEBOOK")")"
 
 command -v colab >/dev/null || { echo "colab CLI 未安装: uv tool install google-colab-cli" >&2; exit 2; }
 
+# 注意: `colab status -s X` 在 session 不存在时退出码仍是 0，必须解析 `colab sessions`。
+session_exists() {
+  colab sessions 2>/dev/null | awk -v want="[$SESSION]" '$1 == want { found = 1 } END { exit !found }'
+}
+
 # 1. 确保 session 存在（幂等）
-if ! colab status -s "$SESSION" >/dev/null 2>&1; then
+if ! session_exists; then
   echo "[run-nb] session '$SESSION' 不存在，创建中${GPU:+（--gpu $GPU）}..."
   # shellcheck disable=SC2086
   colab new -s "$SESSION" ${GPU:+--gpu "$GPU"} >/dev/null || { echo "[run-nb] 创建 session 失败" >&2; exit 1; }
