@@ -198,8 +198,12 @@ repo_ref = "b7500b848f84ad7f86e277b4612563b69f4f88f9"   # 完整 sha，别写短
 Python/torch/GPU、已有数据集的 manifest 摘要）。它是**人眼可读的证据**，
 每次覆盖，用来回答"上次跑的是哪个版本"。
 
+**`env.json` 里 `repo.dirty: true` 是正常的**（rPPG 项目）：hooks 的源码补丁就是在
+钉死的 commit 上改文件，所以工作区永远是 dirty 的。判断"是不是正确版本"看的是
+`repo.head == repo.ref`，不是 dirty。
+
 数据也能钉版本：`[[data]]` 里加 `version = 3` → `kagglehub.dataset_download("slug/versions/3")`；
-不写就是 latest（数据目录名不变，所以**换版本要先删对应目录**，否则 manifest 命中会跳过下载）。
+不写就是 latest。钉了版本的目录名会带 `@v3`，和 latest 分开住，不会互相污染。
 
 ---
 
