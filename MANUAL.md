@@ -106,7 +106,10 @@ MyDrive/Colab_Projects/                 ← 唯一的工作根。别在 Drive �
 | 2 | 右上角 `Select Kernel` → `Colab` → `Auto Connect` | VS Code |
 | 3 | 跑第 0 格（约 40 秒，第一次；之后 1–3 秒） | VS Code |
 
-第 0 格会自己完成：挂 Drive → clone 代码 → 判断新机器 → 装依赖打补丁 → 载凭据 → 备数据 → 打印硬件。**你不需要手动做其中任何一步。**
+用 CLI 时多一步：`colab drivemount -s <name>` 跑**两次**（见附录 C，第一次大概率 400）。
+VS Code 扩展连的 kernel 不需要这一步——扩展自己会弹授权。
+
+第 0 格会自己完成：挂 Drive → clone 代码（钉死版本）→ 判断新机器 → 装依赖打补丁 → 校正 torch CUDA → 载凭据 → 备数据 → 打印硬件 → 写 `env.json` 版本戳。**你不需要手动做其中任何一步。**
 
 ### 4.2 编辑（改代码）
 
@@ -381,13 +384,34 @@ python3 scripts/sessions.py release <session-id>
 # 保活（长任务期间）
 python3 scripts/sessions.py keepalive <session-id>
 
-# 新建 GPU session / 停掉
+# 新建 GPU session
 colab new -s work --gpu T4
+
+# 挂 Drive（**纯 CLI 环境要跑两次**，见下）
+colab drivemount -s work   # 第一次：触发浏览器授权，非交互时大概率报 Error propagating: 400
+colab drivemount -s work   # 第二次：Credentials propagated → Mounted at /content/drive
+
+# 停掉
 colab stop -s work
 
 # 看余额与配额
 colab usage
 ```
+
+### 为什么 `drivemount` 要跑两次（实测于 2026-11-27，CPU 与 T4 实例均复现）
+
+CLI 的流程是「先问 Google 授过没 → 没授就打印链接等你按 Enter → 再传播凭据」。
+在 `colab exec` / 脚本里 `stdin` 是 EOF，它**不会等你**，于是拿不到授权直接 POST → `400`。
+第一次调用只是把授权页弹进你的浏览器；授权态落地后，第二次调用才能 `Credentials propagated`。
+
+| 第几次 | 输出 | 含义 |
+|---|---|---|
+| 1 | `REQUIRED: Google Drive Authorization needed` + 链接 → `Error propagating: 400` | 浏览器被打开了，你没来得及授权 |
+| 2 | `Authorizing VM...` → `Credentials propagated. Resuming mount...` → `Mounted at /content/drive` | 成了 |
+| 3+ | 直接 `Authorizing VM...` → `Drive already mounted at /content/drive` | 幂等，秒过 |
+
+**授权是按 session 的**（链接里的 `state` 带着 `endpoint=m-s-...`），换新 session 要重新走一次。
+想一次成功就把命令放到**真终端**里跑，看到 `Press Enter` 就等浏览器里点完再回车。
 
 ---
 

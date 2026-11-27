@@ -48,6 +48,7 @@ def _cv2_version() -> str:
 # CPU 版 torch 在 GPU 机器上跑**不会报错**，只会慢 10~20 倍或直接 OOM —— 比崩溃更难发现，
 # 所以在第 0 格里显式校正：有 GPU 就必须 torch.version.cuda 非空且 cuda.is_available()。
 _CUDA_INDEXES = (
+    'https://download.pytorch.org/whl/cu130',   # 2026-11 的 Colab 镜像自带 cu130（driver 580.x）
     'https://download.pytorch.org/whl/cu124',
     'https://download.pytorch.org/whl/cu121',
     'https://download.pytorch.org/whl/cu118',
