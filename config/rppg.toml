@@ -5,6 +5,10 @@
 name      = "rppg"
 repo_url  = "https://github.com/ubicomplab/rPPG-Toolbox.git"
 repo_name = "rPPG-Toolbox"
+# 钉死的上游版本（完整 sha）。空值 = 只用默认分支最新，不建议。
+# 为什么必须钉：hooks.py 里 6 处源码补丁匹配的是这个 commit 的具体字符串，
+# 上游一改补丁就静默失效；依赖也是按这个版本的 requirements 装的。
+repo_ref  = "b7500b848f84ad7f86e277b4612563b69f4f88f9"
 
 # ---------------------------------------------------------------- 依赖探针
 # 只写两类包：
@@ -22,6 +26,7 @@ opencv-python-headless = "4.10"
 # ---------------------------------------------------------------- 数据
 # 数据一律落 Google Drive：Colab_Projects/cache/kaggle/<owner>__<dataset>
 # 不在 /content 留存（只有解压时的临时包会短暂停留，跑完自动清）
+# 钉数据版本：[[data]] 里加 version = 3 → 拉 slug/versions/3；不写 = latest
 # check = 就绪判据的 glob；只判 manifest 存在 + 文件数达标
 
 [[data]]

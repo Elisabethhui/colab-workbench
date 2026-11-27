@@ -236,6 +236,27 @@ def mark_ready(project: str, info: dict) -> None:
     sentinel_path(project).write_text(json.dumps(info, ensure_ascii=False, indent=2))
 
 
+def _workflow_head() -> str:
+    """工作流仓库（bootstrap.py 所在的 git repo）自己的 commit；不是 git 就返回空串。"""
+    r = sh(["git", "-C", str(WB_HOME), "rev-parse", "HEAD"])
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def _dataset_stamp(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """数据版本戳：直接读 Drive 上的 .manifest.json，不重新下载。"""
+    out: List[Dict[str, Any]] = []
+    for spec in _data_specs(cfg):
+        d = _data_dir(CACHE_ROOT, spec)
+        m = d / ".manifest.json"
+        try:
+            data = json.loads(m.read_text())
+        except Exception:  # noqa: BLE001
+            continue
+        out.append({"id": data.get("id"), "version": data.get("version"),
+                    "files": data.get("files"), "fetched_at": data.get("fetched_at")})
+    return out
+
+
 # ------------------------------------------------------------------ 3. 配置 / hooks
 def load_config(project: str, config_dir: Optional[Path] = None) -> Dict[str, Any]:
     cfg_dir = config_dir or (WB_HOME / "config")
@@ -258,25 +279,70 @@ def load_hooks(project: str) -> Any:
 
 
 # ------------------------------------------------------------------ 4. 代码
+def repo_head(dest: Path) -> str:
+    """当前 checkout 的完整 commit sha（不是 git 仓库就返回空串）。"""
+    r = sh(["git", "-C", str(dest), "rev-parse", "HEAD"])
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def repo_dirty(dest: Path) -> bool:
+    r = sh(["git", "-C", str(dest), "status", "--porcelain"])
+    return bool((r.stdout or "").strip())
+
+
+def _resolve_ref(dest: Path, ref: str) -> str:
+    """repo_ref（完整 sha / 短 sha / tag / 分支）→ 完整 sha；解不出来返回空串。"""
+    r = sh(["git", "-C", str(dest), "rev-parse", f"{ref}^{{commit}}"])
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
 def ensure_repo(cfg: Dict[str, Any], dest: Path) -> Path:
+    """拿代码。配了 repo_ref 就**钉死**在那个 commit，钉不上就报错，不偷跑最新版。
+
+    为什么要钉：hooks 里的源码补丁是按具体 commit 的字符串写的（np.mat、
+    multi_process_quota=16 之类），上游改一个字符补丁就静默失效；依赖也是按这个版本的
+    requirements 装的。代码每次重拿 ≠ 每次拿最新，而是每次拿**同一个**版本。
+    """
     proj = cfg.get("project", {})
     url = proj.get("repo_url")
+    ref = (proj.get("repo_ref") or "").strip()
     if not url:
         dest.mkdir(parents=True, exist_ok=True)
         print(f"  代码          无 repo_url，使用空目录 {dest}")
         return dest
+
     if (dest / ".git").exists():
-        sh(["git", "-C", str(dest), "pull", "-q"], quiet=False)
-        print(f"  代码          git pull → {dest}")
+        sh(["git", "-C", str(dest), "fetch", "-q", "--tags", "--prune", "origin"], quiet=False)
+        print(f"  代码          git fetch → {dest}")
     elif dest.exists() and any(dest.iterdir()):
-        print(f"  代码          已存在（非 git 目录）→ {dest}")
+        print(f"  代码          已存在（非 git 目录，无法钉版本）→ {dest}")
+        return dest
     else:
         dest.parent.mkdir(parents=True, exist_ok=True)
         sh(["git", "clone", "-q", url, str(dest)], check=True)
         print(f"  代码          git clone → {dest}")
-    head = sh(["git", "-C", str(dest), "rev-parse", "--short", "HEAD"]).stdout.strip()
-    if head:
-        print(f"  代码          HEAD = {head}")
+
+    if not ref:
+        print(f"  代码          ⚠ 未配 repo_ref，用默认分支 {repo_head(dest)[:8]}"
+              "（上游一改，hooks 补丁可能静默失效）")
+        print(f"  代码          HEAD = {repo_head(dest)[:8]}")
+        return dest
+
+    want = _resolve_ref(dest, ref)
+    if not want:
+        raise RuntimeError(
+            f"  代码          ✗ repo_ref={ref!r} 在 {url} 里找不到，拒绝用别的版本糊过去。\n"
+            f"                改 config/<project>.toml 的 repo_ref，或先确认这个 commit/tag 已 push。"
+        )
+    have = repo_head(dest)
+    if have != want:
+        sh(["git", "-C", str(dest), "checkout", "-q", "-f", "--detach", want], check=True)
+        print(f"  代码          checkout {ref} → {dest}")
+    # 无论走没走 checkout，都复核一遍：钉版本这件事不允许"看起来对"
+    got = repo_head(dest)
+    if got != want:
+        raise RuntimeError(f"  代码          ✗ 期望 {want[:8]}，实际 {got[:8]}，checkout 没生效")
+    print(f"  代码          HEAD = {got[:8]}（固定版本 ✓）")
     return dest
 
 
@@ -443,6 +509,8 @@ def _data_dir(root: Path, spec: Dict[str, Any]) -> Path:
     """
     src = spec.get("source", "local")
     rev = spec.get("tag") or spec.get("revision") or ""
+    if not rev and src == "kaggle" and spec.get("version"):
+        rev = f"v{spec['version']}"          # 钉了数据版本 → 目录带 @v3，不会和 latest 混住
     rev = f"@{rev}" if rev else ""
     if src == "kaggle":
         return root / "kaggle" / (str(spec.get("slug", "dataset")).replace("/", "__") + rev)
@@ -504,6 +572,7 @@ def _write_manifest(d: Path, spec: Dict[str, Any], registry: Optional[Path] = No
         "source": spec.get("source"),
         "id": spec.get("slug") or spec.get("repo"),
         "tag": spec.get("tag"),
+        "version": spec.get("version"),
         "fetched_at": _now(),
         "files": files,
         "check": spec.get("check"),
@@ -543,7 +612,11 @@ def fetch_data(spec: Dict[str, Any], dest: Path) -> bool:
 
     if src == "kaggle":
         slug = spec["slug"]
-        print(f"                 kagglehub.dataset_download({slug!r}) → {dest}")
+        # 钉数据版本：spec.version = 3 → 拉 slug/versions/3（不写就拿 latest）
+        version = spec.get("version")
+        target = f"{slug}/versions/{version}" if version else slug
+        print(f"                 kagglehub.dataset_download({target!r})" + ("" if version else "（latest）")
+              + f" → {dest}")
         try:
             import kagglehub  # noqa: PLC0415
         except ModuleNotFoundError:
@@ -553,7 +626,7 @@ def fetch_data(spec: Dict[str, Any], dest: Path) -> bool:
         # 压缩包的临时落脚点放本地盘（必须的临时文件），数据集本体直落 Drive
         os.environ["KAGGLEHUB_CACHE"] = str(CACHE_DIR / "kagglehub")
         try:
-            kagglehub.dataset_download(slug, force_download=False, output_dir=str(dest))
+            kagglehub.dataset_download(target, force_download=False, output_dir=str(dest))
         except TypeError:
             # 老版本 kagglehub 没有 output_dir：缓存模式会建 symlink，Drive 上必然失败，
             # 所以缓存放本地、解引用后搬到 Drive（仅此一条退路）
@@ -704,6 +777,10 @@ def setup(project: str,
 
     # 6) 代码
     ensure_repo(cfg, paths.repo)
+    repo_info = {"head": repo_head(paths.repo),
+                 "ref": cfg.get("project", {}).get("repo_ref") or "",
+                 "url": cfg.get("project", {}).get("repo_url") or "",
+                 "dirty": repo_dirty(paths.repo)}
 
     # 7) 依赖 / 补丁
     hooks = load_hooks(project)
@@ -724,19 +801,39 @@ def setup(project: str,
     if not skip_data:
         prepare_data(cfg, ctx, hooks)
 
-    # 9) 落哨兵
-    mark_ready(project, {"ready_at": _now(), "repo": str(paths.repo),
-                         "secrets": src, "fresh": fresh})
-
-    # 10) 硬件摘要
+    # 9) 硬件摘要（先取，下面要写进版本戳）
+    hw: Dict[str, Any] = {"accelerator": "CPU"}
     try:
         import torch  # noqa: PLC0415
         if torch.cuda.is_available():
+            hw = {"accelerator": "GPU", "gpu": torch.cuda.get_device_name(0),
+                  "torch": torch.__version__}
             print(f"  硬件          GPU: {torch.cuda.get_device_name(0)} | torch {torch.__version__}")
         else:
+            hw = {"accelerator": "CPU", "torch": torch.__version__}
             print(f"  硬件          CPU | torch {torch.__version__}")
     except Exception:  # noqa: BLE001
         print("  硬件          torch 未安装")
+
+    # 10) 版本戳：写进 Drive，换机器/换月也能回答"上次跑的是哪个版本"
+    stamp = {
+        "stamped_at": _now(),
+        "project": project,
+        "repo": repo_info,
+        "workflow_head": _workflow_head(),
+        "env": {"python": sys.version.split()[0], **hw},
+        "datasets": _dataset_stamp(cfg),
+    }
+    stamp_file = paths.project / "env.json"
+    try:
+        stamp_file.write_text(json.dumps(stamp, ensure_ascii=False, indent=2))
+        print(f"  版本戳        {stamp_file}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  版本戳        ⚠ 写不了 {stamp_file}: {e}")
+
+    # 11) 落哨兵
+    mark_ready(project, {"ready_at": stamp["stamped_at"], "repo": str(paths.repo),
+                         "secrets": src, "fresh": fresh})
 
     print("=" * 66)
     print("环境就绪 → 往下跑业务格")

@@ -151,7 +151,8 @@ def prepare(ctx):
             continue
         text = src.read_text()
         text = text.replace(GRSCRATCH_RAW, str(view))
-        text = text.replace(GRSCRATCH_CACHE, str(ctx.paths.cache / 'rppg'))
+        # 预处理缓存是可再生的中间产物 → 放 VM 本地盘（vmcache），不进 Drive
+        text = text.replace(GRSCRATCH_CACHE, str(ctx.paths.vmcache / 'rppg'))
         text = text.replace('DO_PREPROCESS: False', 'DO_PREPROCESS: True')
         text = text.replace('["ICA", "POS", "CHROM", "GREEN", "LGI", "PBV", "OMIT"]', '["POS", "CHROM"]')
         (ctx.paths.repo / 'configs/infer_configs' / out_name).write_text(text)

@@ -23,7 +23,7 @@
 ### 四条事实
 
 ```
-① 代码   = GitHub（public）        → 每台 VM 重新 clone，几秒钟
+① 代码   = GitHub（public，**钉死到某个 commit**）→ 每台 VM 重新 clone，几秒钟，拿的是同一个版本
 ② 数据   = Google Drive            → 一次下载，永久复用
 ③ 机器   = 临时 Colab VM           → 随时被回收，什么都不存
 ④ 环境   = 每个 notebook 的第 0 格  → 唯一入口，幂等
@@ -31,7 +31,7 @@
 
 ### 一句话
 
-> **代码每次重新拿，数据一次不重拿。**
+> **代码每次重新拿（同一个版本），数据一次不重拿。**
 > 你只需要：**说需求 → 点运行 → 切内核**。
 
 ### 两个环
@@ -155,6 +155,52 @@ Agent 的硬规则（写在 `AGENTS.md` 里，你可以让我随时加）：
 | **想立刻放掉 VS Code 连的那台机器** | `python3 scripts/sessions.py release <session-id>` |
 | 改了 notebook | `git commit`（nbstripout 自动清输出） |
 
+### 4.6 版本钉死：为什么每次拿的是**同一个** commit
+
+"代码每次重新拿"容易被理解成"每次拿最新版"，那是错的。真实规则是：**每次拿 config 里
+`repo_ref` 写死的那一个 commit**。
+
+```toml
+[project]
+repo_url = "https://github.com/ubicomplab/rPPG-Toolbox.git"
+repo_ref = "b7500b848f84ad7f86e277b4612563b69f4f88f9"   # 完整 sha，别写短 sha
+```
+
+**为什么必须钉**（不是为了洁癖，是有具体故障）：
+
+| 不钉会发生什么 | 机制 |
+|---|---|
+| hooks 的 6 处源码补丁静默失效 | 补丁是字符串替换（`np.mat`→`np.asmatrix`、`multi_process_quota=16`→`2`）。上游改一个字符就匹配不上，`_patch()` 只打标记不回滚，你会得到一个"跑得起来但结果错的"环境 |
+| 依赖按错版本的 requirements 装 | `hooks.install()` 生成过滤版 requirements 时读的是当时那个 commit 的文件 |
+| 论文/结果无法复现 | 你不知道上次跑的到底是哪一版代码 |
+
+**bootstrap 的实际行为**：
+
+| 情况 | 动作 |
+|---|---|
+| `repo_ref` 为空 | 用默认分支最新版，打印 `⚠ 未配 repo_ref`（不推荐） |
+| 已有 clone，HEAD ≠ ref | `git fetch --tags --prune` → `git checkout -f --detach <sha>` |
+| 已有 clone，HEAD == ref | 什么都不做（秒过） |
+| `repo_ref` 在远端找不到 | **直接抛错停下**，拒绝用别的版本糊过去 |
+| checkout 后 sha 与期望不符 | 再抛一次错（钉版本这件事不允许"看起来对"） |
+
+**升级上游版本的正确步骤**（4 步）：
+
+1. 本地 clone 上游，`git log` 找到能跑的目标 commit，拿完整 sha
+2. 改 `config/<project>.toml` 的 `repo_ref`
+3. 逐个检查 `projects/<project>/hooks.py` 里的补丁字符串在新版里是否还存在
+   （上游改了 API：补丁要么改写，要么删掉）
+4. `WB_FORCE_INSTALL=1` 重跑第 0 格（依赖可能跟着变），然后看 Drive 上
+   `projects/<project>/env.json` 里的 `repo.head` 是否已经是新的
+
+**版本戳落在哪**：每次第 0 格跑完会写
+`Drive/Colab_Projects/projects/<project>/env.json`（工作流版本、上游 commit、
+Python/torch/GPU、已有数据集的 manifest 摘要）。它是**人眼可读的证据**，
+每次覆盖，用来回答"上次跑的是哪个版本"。
+
+数据也能钉版本：`[[data]]` 里加 `version = 3` → `kagglehub.dataset_download("slug/versions/3")`；
+不写就是 latest（数据目录名不变，所以**换版本要先删对应目录**，否则 manifest 命中会跳过下载）。
+
 ---
 
 ## 5. 新建一个项目（3 个动作）
@@ -264,6 +310,10 @@ cat "/Users/huguoqing/Library/CloudStorage/GoogleDrive-*/我的云端硬盘/Cola
 | 依赖"看起来装过了"却没装 | 探针查了 Colab **预装**的包（如 einops 0.8.2） | 探针只查 `neurokit2` / `yacs` / `opencv` 这类**不在镜像里或版本敏感**的包 |
 | 换 GPU 后一切重来 | 这是正常行为：新 VM = 空本地盘 | 重跑第 0 格（40 秒），数据不会再下载 |
 | Drive 上产物是 0 字节 | 写 Drive 的句柄没关就断了 VM | 用 `with open(...)` 或 `.write_text()`；长任务分段写 |
+| `repo_ref=... 在 <url> 里找不到` | 配了一个远端不存在的 commit/tag（打错、或没 push 上去、或写成了本地短 sha） | 用完整 sha；`git ls-remote <url> HEAD` 确认远端有这版 |
+| 补丁突然失效 / 结果诡异 | 上游代码变了但 `repo_ref` 没钉（或被人改成最新分支），字符串替换匹配不上 | 钉回原 sha；改了补丁要一起改 |
+| `AttributeError: 'Paths' object has no attribute 'cache'` | `Paths` 重构过（`datasets`=Drive 数据、`vmcache`=VM 本地），老 hooks 还在用已删除的 `.cache` | hooks 里把 `ctx.paths.cache` 改成 `ctx.paths.vmcache` |
+| `colab drivemount` 报 `Error propagating: 400` | 该 Google 账号**从未**给 Colab 授过 Drive 权限；而且非交互 shell 读 `/dev/tty` 立刻 EOF，CLI 不会停下来等你点授权 | 在**人类终端**跑一次 `colab drivemount -s <session>`，点掉它弹出的浏览器授权页；成功一次后永久生效（本次已打通） |
 
 ---
 
