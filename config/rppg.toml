@@ -20,21 +20,21 @@ opencv-python-headless = "4.10"
 # commands = ["python -m pip install -q -e ."]
 
 # ---------------------------------------------------------------- 数据
-# 每个数据集一条 [[data]]；bootstrap 会看 manifest 决定要不要下载
+# dest = "drive"  小数据（<2G）：放 Drive，跨 VM 复用，不用重下
+# dest = "vm"     大数据：只放 VM 本地盘 /content/_cache/data，每次开机重下
+#                  （Drive 免费额度 15G，这套 UBFC 解压后 60-70G，只能走 vm）
+# prune_archive = true  下完删掉 kagglehub 的 .archive 缓存，省一块盘
+
 [[data]]
-source = "kaggle"
-slug   = "OWNER/SLUG_A"          # ← 待填：Kaggle notebook 里 !ls /kaggle/input 的输出
-tag    = "v1"
-check  = "**/subject*_vid.avi"
-count  = 42
+source        = "kaggle"
+slug          = "maleehanasirkhan/ubfc-rppg-part1"
+dest          = "vm"
+check         = "**/subject*_vid.avi"
+prune_archive = true
 
-# [[data]]
-# source = "kaggle"
-# slug   = "OWNER/SLUG_B"
-# tag    = "v1"
-
-# [[data]]
-# source = "hf"
-# repo   = "your-name/ubfc-processed"
-# revision = ""                  # 留空跟 main；填 sha 可钉版本
-# repo_type = "dataset"
+[[data]]
+source        = "kaggle"
+slug          = "maleehanasirkhan/ubfc-rppg-part2"
+dest          = "vm"
+check         = "**/subject*_vid.avi"
+prune_archive = true

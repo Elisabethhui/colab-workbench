@@ -38,6 +38,7 @@ VMLOCAL = Path(os.environ.get("WB_VMLOCAL", "/content"))      # 本地盘：随 
 DRIVE_ROOT = Path(os.environ.get("WB_DRIVE_ROOT", "/content/drive/MyDrive"))
 SENTINEL_DIR = VMLOCAL / ".wb"
 CACHE_DIR = VMLOCAL / "_cache"
+DATA_LOCAL_ROOT = CACHE_DIR / "data"      # dest="vm" 的数据落点：本地盘，随 VM 生灭
 WB_HOME = Path(__file__).resolve().parent                       # 工作流仓库根
 
 INTERACTIVE = sys.stdin.isatty() or bool(os.environ.get("WB_INTERACTIVE"))
@@ -274,40 +275,58 @@ def load_secrets() -> tuple[Dict[str, Any], str]:
     return {}, "(未找到)"
 
 
+def _real(value: Any) -> str:
+    """过滤空值 / 占位符 / 明显没填的值，避免把模板文字当成凭据发出去。"""
+    v = str(value or "").strip()
+    if not v:
+        return ""
+    bad = ("填", "your", "xxx", "XXXX", "<", ">", "api_key_here", "none", "null")
+    if any(b in v for b in bad) or any(c.isspace() for c in v):
+        return ""
+    return v
+
+
 def apply_secrets(sec: Dict[str, Any]) -> None:
     hf = sec.get("huggingface") or {}
-    if hf.get("token"):
-        os.environ["HF_TOKEN"] = hf["token"]
-        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf["token"])
+    token = _real(hf.get("token"))
+    if token:
+        os.environ["HF_TOKEN"] = token
+        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
 
     kg = sec.get("kaggle") or {}
-    if kg.get("username") and kg.get("key"):
-        os.environ["KAGGLE_USERNAME"] = kg["username"]
-        os.environ["KAGGLE_KEY"] = kg["key"]
+    user, key = _real(kg.get("username")), _real(kg.get("key"))
+    if user and key:
+        os.environ["KAGGLE_USERNAME"] = user
+        os.environ["KAGGLE_KEY"] = key
         # 官方 CLI 也认 ~/.kaggle/kaggle.json；写本地盘，随 VM 消失
         kdir = Path.home() / ".kaggle"
         kdir.mkdir(exist_ok=True)
         kjson = kdir / "kaggle.json"
-        kjson.write_text(json.dumps({"username": kg["username"], "key": kg["key"]}))
+        kjson.write_text(json.dumps({"username": user, "key": key}))
         kjson.chmod(0o600)
 
     wb = sec.get("wandb") or {}
-    if wb.get("api_key"):
-        os.environ["WANDB_API_KEY"] = wb["api_key"]
+    wkey = _real(wb.get("api_key"))
+    if wkey:
+        os.environ["WANDB_API_KEY"] = wkey
 
 
 def print_secret_summary(sec: Dict[str, Any], source: str) -> None:
     print(f"  凭据          来源 = {source}")
     for section, field_name in (("huggingface", "token"), ("kaggle", "key"), ("wandb", "api_key")):
-        v = (sec.get(section) or {}).get(field_name)
-        if v:
-            print(f"                {section}.{field_name} = {_mask(str(v))}")
+        v = _real((sec.get(section) or {}).get(field_name))
+        print(f"                {section}.{field_name} = {_mask(v) if v else '(未填)'}")
 
 
 # ------------------------------------------------------------------ 7. 数据
 def _data_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     raw = cfg.get("data") or []
     return [raw] if isinstance(raw, dict) else list(raw)
+
+
+def _dest_root(drive_data: Path, spec: Dict[str, Any]) -> Path:
+    """数据集落到哪：Drive（小数据，跨 VM 复用）还是 VM 本地盘（大数据，每次重下）。"""
+    return DATA_LOCAL_ROOT if str(spec.get("dest", "drive")) == "vm" else drive_data
 
 
 def _data_dir(root: Path, spec: Dict[str, Any]) -> Path:
@@ -368,12 +387,39 @@ def fetch_data(spec: Dict[str, Any], dest: Path) -> bool:
 
     if src == "kaggle":
         slug = spec["slug"]
-        print(f"                 kaggle download {slug}")
-        r = sh([_kaggle_bin(), "datasets", "download",
-                "-d", slug, "-p", str(staging), "--unzip"], quiet=False)
-        if r.returncode != 0:
-            print("                 ✗ 失败：401=凭据 / 403=未接受数据集规则 / 404=slug 错")
+        print(f"                 kagglehub.dataset_download({slug!r})")
+        # 官方通道 kagglehub：公开数据集免登录，自带版本缓存与解压
+        os.environ.setdefault("KAGGLEHUB_CACHE", str(CACHE_DIR / "kagglehub"))
+        try:
+            import kagglehub  # noqa: PLC0415
+        except ModuleNotFoundError:
+            sh([sys.executable, "-m", "pip", "install", "-q", "kagglehub"], check=True)
+            import kagglehub  # noqa: PLC0415
+        try:
+            got = Path(kagglehub.dataset_download(slug, force_download=False))
+        except Exception as exc:  # noqa: BLE001
+            print(f"                 ✗ 失败 {type(exc).__name__}: {str(exc)[:200]}")
+            print("                   401/403 = 数据集私有或未接受规则 → 填 _secrets/secrets.toml")
             return False
+        # kagglehub 缓存里是符号链接；Drive 不支持软链，必须解引用成真实文件
+        for item in got.iterdir():
+            dst = staging / item.name
+            if item.is_dir():
+                shutil.copytree(item, dst, symlinks=False, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dst)
+        print(f"                 已取 {got.name} → 暂存 {sum(1 for _ in staging.rglob('*'))} 项")
+        if spec.get("prune_archive", True):
+            # 解压后的 avi 已经是原包的数倍；留着 1.archive 会白吃一块本地盘
+            freed = 0
+            for arc in (CACHE_DIR / "kagglehub").rglob("*.archive"):
+                try:
+                    freed += arc.stat().st_size
+                    arc.unlink()
+                except OSError:
+                    pass
+            if freed:
+                print(f"                 已删掉压缩包缓存，释放 {freed / 2**30:.1f} GB 本地盘")
     elif src == "hf":
         from huggingface_hub import snapshot_download  # noqa: PLC0415
         snapshot_download(repo_id=spec["repo"], revision=spec.get("revision"),
@@ -403,18 +449,23 @@ def prepare_data(cfg: Dict[str, Any], ctx: "Ctx", hooks: Any) -> None:
         if hooks and hasattr(hooks, "prepare"):
             hooks.prepare(ctx)
         return
-    need_download = [s for s in specs if not _manifest_ok(_data_dir(ctx.paths.data, s), s)]
+    need_download = [s for s in specs
+                     if not _manifest_ok(_data_dir(_dest_root(ctx.paths.data, s), s), s)]
     if not need_download:
-        print(f"  数据          {len(specs)} 个数据集均在 Drive 就绪（0 次网络请求）")
+        where = {"vm": "VM 本地盘", "drive": "Drive"}
+        tags = "/".join(sorted({where.get(str(s.get("dest", "drive")), "?") for s in specs}))
+        print(f"  数据          {len(specs)} 个数据集在{tags}已就绪（0 次网络请求）")
+        if hooks and hasattr(hooks, "prepare"):
+            hooks.prepare(ctx)
         return
     for spec in need_download:
-        d = _data_dir(ctx.paths.data, spec)
+        d = _data_dir(_dest_root(ctx.paths.data, spec), spec)
         print(f"  数据          下载 {spec.get('source')}:{spec.get('slug') or spec.get('repo')} → {d}")
         if fetch_data(spec, d):
             _write_manifest(d, spec)
             print("                 完成")
     for spec in specs:  # 补齐缺失的 manifest
-        d = _data_dir(ctx.paths.data, spec)
+        d = _data_dir(_dest_root(ctx.paths.data, spec), spec)
         if d.exists() and not (d / ".manifest.json").exists():
             _write_manifest(d, spec)
 
