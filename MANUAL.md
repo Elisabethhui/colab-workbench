@@ -313,6 +313,7 @@ cat "/Users/huguoqing/Library/CloudStorage/GoogleDrive-*/我的云端硬盘/Cola
 | Chrome 授权页 `ERR_CONNECTION_REFUSED` | 扩展只等 **60 秒**，超时就关本地端口 | 60 秒内点完；或选 "different authentication method" 走手动贴 code |
 | 依赖"看起来装过了"却没装 | 探针查了 Colab **预装**的包（如 einops 0.8.2） | 探针只查 `neurokit2` / `yacs` / `opencv` 这类**不在镜像里或版本敏感**的包 |
 | 换 GPU 后一切重来 | 这是正常行为：新 VM = 空本地盘 | 重跑第 0 格（40 秒），数据不会再下载 |
+| T4 上 `torch.__version__` 带 `+cpu`、`cuda.is_available()` 为 False | Colab 镜像预装的是 **CPU 版** torch wheel（不会报错，只会慢 10~20 倍） | `hooks.ensure_torch()` 自动换成 cu124/cu121 wheel；看第 0 格打 `torch 2.x + CUDA 12.x → Tesla T4` 才算对 |
 | Drive 上产物是 0 字节 | 写 Drive 的句柄没关就断了 VM | 用 `with open(...)` 或 `.write_text()`；长任务分段写 |
 | `repo_ref=... 在 <url> 里找不到` | 配了一个远端不存在的 commit/tag（打错、或没 push 上去、或写成了本地短 sha） | 用完整 sha；`git ls-remote <url> HEAD` 确认远端有这版 |
 | 补丁突然失效 / 结果诡异 | 上游代码变了但 `repo_ref` 没钉（或被人改成最新分支），字符串替换匹配不上 | 钉回原 sha；改了补丁要一起改 |

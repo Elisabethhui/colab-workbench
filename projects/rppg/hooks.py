@@ -11,6 +11,7 @@ bootstrap.py 是通用的，这里才放"这个仓库的奇怪之处"：
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import shutil
@@ -42,6 +43,57 @@ def _cv2_version() -> str:
     return r.stdout.strip() or 'missing'
 
 
+# ------------------------------------------------------------------ torch / CUDA
+# Colab 的预装 torch 有时候是 CPU 版（版本号带 +cpu），而实例是 T4/A100/L4。
+# CPU 版 torch 在 GPU 机器上跑**不会报错**，只会慢 10~20 倍或直接 OOM —— 比崩溃更难发现，
+# 所以在第 0 格里显式校正：有 GPU 就必须 torch.version.cuda 非空且 cuda.is_available()。
+_CUDA_INDEXES = (
+    'https://download.pytorch.org/whl/cu124',
+    'https://download.pytorch.org/whl/cu121',
+    'https://download.pytorch.org/whl/cu118',
+)
+
+
+def _has_nvidia() -> bool:
+    return shutil.which('nvidia-smi') is not None or os.path.exists('/proc/driver/nvidia')
+
+
+def torch_state() -> dict:
+    r = subprocess.run([sys.executable, '-c',
+        'import json,torch;'
+        'print(json.dumps({"ver":torch.__version__,"cuda":torch.version.cuda or None,'
+        '"avail":torch.cuda.is_available(),'
+        '"dev":(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")}))'],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return {'ver': 'missing', 'cuda': None, 'avail': False, 'dev': ''}
+    try:
+        return json.loads((r.stdout or '').strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001
+        return {'ver': '?', 'cuda': None, 'avail': False, 'dev': ''}
+
+
+def ensure_torch(ctx):
+    """GPU 实例上如果装的是 CPU 版 torch，就换成 CUDA wheel；纯 CPU 实例什么都不做。"""
+    st = torch_state()
+    if not _has_nvidia():
+        print(f"    [hooks] 本实例无 GPU → torch {st['ver']}（CPU 版是对的）")
+        return
+    if st['avail'] and st['cuda']:
+        print(f"    [hooks] torch {st['ver']} + CUDA {st['cuda']} → {st['dev']}")
+        return
+    print(f"    [hooks] ⚠ 有 GPU 但 torch {st['ver']} 是 CPU 版 → 重装 CUDA wheel（约 2 GB）")
+    for idx in _CUDA_INDEXES:
+        print(f"    [hooks] 试源 {idx}")
+        _sh(f'{sys.executable} -m pip install -q --no-cache-dir --index-url {idx} '
+            'torch torchvision torchaudio')
+        st = torch_state()
+        if st['avail'] and st['cuda']:
+            print(f"    [hooks] torch {st['ver']} + CUDA {st['cuda']} → {st['dev']}")
+            return
+    print("    [hooks] ✗ 所有 CUDA 源都没装上，只能继续用 CPU 版（会慢很多）")
+
+
 def install(ctx):
     repo = ctx.paths.repo
     print('    [hooks] 生成过滤版 requirements.txt')
@@ -60,6 +112,8 @@ def install(ctx):
             check=True)
     print(f'    [hooks] cv2 = {_cv2_version()}')
 
+    # GPU 实例上把 CPU 版 torch 换掉（T4/A100 上这是必做项）
+    ensure_torch(ctx)
 
 # ------------------------------------------------------------------ 补丁
 def _patch(label, relpath, marker, transform, repo: Path):
