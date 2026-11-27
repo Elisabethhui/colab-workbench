@@ -367,14 +367,10 @@ def apply_secrets(sec: Dict[str, Any]) -> None:
     kg = sec.get("kaggle") or {}
     user, key = _real(kg.get("username")), _real(kg.get("key"))
     if user and key:
+        # 只注入环境变量，**不落盘**：密钥的唯一存放地是 Drive 上的 _secrets/
+        # kagglehub 认 KAGGLE_USERNAME / KAGGLE_KEY，无需 ~/.kaggle/kaggle.json
         os.environ["KAGGLE_USERNAME"] = user
         os.environ["KAGGLE_KEY"] = key
-        # 官方 CLI 也认 ~/.kaggle/kaggle.json；写本地盘，随 VM 消失
-        kdir = Path.home() / ".kaggle"
-        kdir.mkdir(exist_ok=True)
-        kjson = kdir / "kaggle.json"
-        kjson.write_text(json.dumps({"username": user, "key": key}))
-        kjson.chmod(0o600)
 
     wb = sec.get("wandb") or {}
     wkey = _real(wb.get("api_key"))
