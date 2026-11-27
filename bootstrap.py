@@ -261,18 +261,58 @@ def apply_patches(ctx: "Ctx", hooks: Any) -> None:
 
 
 # ------------------------------------------------------------------ 6. 凭据
+SECRETS_DIR = DRIVE_ROOT / "Colab_Projects" / "_secrets"   # 三个手填文件都在这
 SECRET_CANDIDATES = [
-    ("Drive", DRIVE_ROOT / "Colab_Projects" / "_secrets" / "secrets.toml"),
+    ("Drive", SECRETS_DIR / "secrets.toml"),
     ("workspace", WB_HOME / "_secrets" / "secrets.toml"),
 ]
 
 
 def load_secrets() -> tuple[Dict[str, Any], str]:
+    """按优先级合并三个可能的手工填写文件：
+      Colab_Projects/_secrets/secrets.toml   (推荐，可整份留空)
+      Colab_Projects/_secrets/kaggle.json    (Kaggle 官方格式)
+      Colab_Projects/_secrets/huggingface_token.txt  (一行 token)
+    非空值优先，空值让位给下一个来源。"""
+    sec: Dict[str, Any] = {}
+    used: List[str] = []
+
+    def merge(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
+        for k, v in (src or {}).items():
+            if isinstance(v, dict):
+                merge(dst.setdefault(k, {}), v)
+            elif _real(v) and not _real((dst or {}).get(k)):
+                dst[k] = v
+
     for label, path in SECRET_CANDIDATES:
-        if path.exists():
+        if not path.exists():
+            continue
+        try:
             with path.open("rb") as fh:
-                return tomllib.load(fh), f"{label}:{path}"
-    return {}, "(未找到)"
+                merge(sec, tomllib.load(fh))
+            used.append(label)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠ 读不了 {path.name}: {type(exc).__name__}")
+
+    secrets_dir = SECRETS_DIR
+    kj = secrets_dir / "kaggle.json"
+    if kj.exists():
+        try:
+            raw = json.loads(kj.read_text())
+            merge(sec, {"kaggle": {"username": raw.get("username", ""),
+                                    "key": raw.get("key", "")}})
+            used.append("kaggle.json")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠ kaggle.json 格式不对（应该是 {{\"username\":..,\"key\":..}}）: {exc}")
+
+    hf = secrets_dir / "huggingface_token.txt"
+    if hf.exists():
+        token = hf.read_text().strip()
+        if token:
+            merge(sec, {"huggingface": {"token": token}})
+            used.append("huggingface_token.txt")
+
+    return sec, (" + ".join(used) if used else "(未找到)")
 
 
 def _real(value: Any) -> str:
