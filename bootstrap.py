@@ -44,9 +44,10 @@ CACHE_ROOT = DRIVE_ROOT / DRIVE_SUB / "cache"    # 外部数据原件（kaggle/h
 PROJECTS_ROOT = DRIVE_ROOT / DRIVE_SUB / "projects"   # 项目产物（logs/outputs）
 WB_HOME = Path(__file__).resolve().parent                       # 工作流仓库根
 
-# 注意：不要用 sys.stdin.isatty() 判断"能不能弹授权"。
-# VS Code 的 notebook 内核照样没有 TTY，但它**支持** stdin 弹窗；
-# 唯一可靠的办法是真的去挂，挂不动再翻译异常（见 mount_drive）。
+# 不要用 sys.stdin.isatty() 判断"能不能弹授权"：VS Code 的 notebook 内核同样没有 TTY，
+# 但它支持弹窗。真正可靠的是 Jupyter 协议里的 allow_stdin 标志：
+#   VS Code / 网页 notebook  → allow_stdin=True  → 能弹授权
+#   colab exec / 后台脚本     → allow_stdin=False → 弹不出来（且 drive.mount 会一直等，不报错）
 
 
 # ------------------------------------------------------------------ 小工具
@@ -162,6 +163,23 @@ def _drive_mounted() -> bool:
     return False
 
 
+def _can_prompt() -> bool:
+    """这台内核能不能对用户弹输入框。
+
+    Jupyter 协议里每个 execute_request 都带 allow_stdin：
+      VS Code / 网页 notebook → True（能弹授权窗）
+      colab exec / 后台脚本   → False（弹不出来，且 drive.mount 会静默干等）
+    """
+    try:
+        ip = get_ipython()  # type: ignore[name-defined]  # noqa: F821
+    except NameError:
+        return sys.stdin.isatty()
+    kernel = getattr(ip, "kernel", None)
+    if kernel is None:
+        return sys.stdin.isatty()
+    return bool(getattr(kernel, "_allow_stdin", False))
+
+
 def mount_drive() -> bool:
     """挂不上就**硬失败**，绝不退化成"写本地盘"。"""
     if _drive_mounted():
@@ -173,8 +191,15 @@ def mount_drive() -> bool:
         DRIVE_ROOT.mkdir(parents=True, exist_ok=True)
         return True
 
-    # 不做"是否交互"的预先猜测：VS Code 的 notebook 内核同样没有 TTY，
-    # 但它**支持** stdin 弹窗，所以直接试着挂，挂不动再把原因翻译清楚。
+    if not _can_prompt():
+        raise RuntimeError(
+            "Drive 未挂载，而当前通道弹不出 Google 授权（allow_stdin=False）。\n"
+            "  colab exec / 脚本 / VS Code 里的「命令行执行」都属于这种；二选一：\n"
+            "    1) 在 VS Code 的 notebook 里点运行这一格 —— 会弹授权窗，点允许即可\n"
+            "    2) 先在这个 session 上手动执行: colab drivemount -s <session>\n"
+            "  拒绝继续：否则数据会静默落进 Colab 本地盘，这是明确禁止的。"
+        )
+
     print("  Drive         挂载中（会自动弹一次 Google 授权）...")
     try:
         from google.colab import drive  # noqa: PLC0415  (只在 Colab 里存在)
@@ -185,19 +210,7 @@ def mount_drive() -> bool:
         ) from None
 
     mountpoint = DRIVE_ROOT.parent if DRIVE_ROOT.name == "MyDrive" else DRIVE_ROOT
-    try:
-        drive.mount(str(mountpoint))
-    except Exception as exc:  # noqa: BLE001
-        kind = type(exc).__name__
-        if kind in ("StdinNotImplementedError", "EOFError", "OSError", "BrokenPipeError"):
-            raise RuntimeError(
-                f"Drive 未挂载，而这条通道没有输入通道（{kind}），弹不出授权。\n"
-                "  colab exec / 后台脚本属于这种；解决方法二选一：\n"
-                "    1) 在 VS Code 的 notebook 里点运行这一格（会弹授权窗）\n"
-                "    2) 先在这个 session 上手动执行: colab drivemount -s <session>\n"
-                "  拒绝继续：否则数据会静默落进 Colab 本地盘，这是明确禁止的。"
-            ) from None
-        raise
+    drive.mount(str(mountpoint))
 
     for _ in range(20):  # FUSE 挂载有几百毫秒延迟
         if _drive_mounted():
