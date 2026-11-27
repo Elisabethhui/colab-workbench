@@ -13,6 +13,8 @@ DEST="$BASE/projects/$NAME"
 [[ -e "$DEST" ]] && { echo "已存在: $DEST" >&2; exit 1; }
 
 cp -R "$BASE/projects/_template" "$DEST"
+mv "$DEST/template.ipynb" "$DEST/$NAME.ipynb"
+[[ -f "$BASE/config/$NAME.toml" ]] || cp "$BASE/config/_template.toml" "$BASE/config/$NAME.toml" 2>/dev/null || true
 # 占位符替换
 find "$DEST" -type f \( -name "*.md" -o -name "*.ipynb" -o -name "*.txt" \) -print0 |
   while IFS= read -r -d '' f; do
@@ -26,7 +28,8 @@ cat <<EOF
 
 下一步:
   1. 编辑 projects/$NAME/README.md 写清目标
-  2. ./scripts/colab_up.sh $NAME            # CPU
+  2. 编辑 config/$NAME.toml（上游仓库 / [deps] / [[data]]）
+  3. ./scripts/colab_up.sh $NAME            # CPU
      ./scripts/colab_up.sh $NAME --gpu T4   # 免费 T4
-  3. ./scripts/colab_run_nb.sh projects/$NAME/01_experiment.ipynb $NAME
+  4. ./scripts/colab_run_nb.sh projects/$NAME/$NAME.ipynb $NAME
 EOF

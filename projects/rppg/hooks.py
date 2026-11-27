@@ -118,7 +118,7 @@ def prepare(ctx):
     import bootstrap  # 自己
 
     # 数据只在 Drive 上
-    root = ctx.paths.data / 'kaggle'
+    root = ctx.paths.datasets / 'kaggle'
     vids = []
     for d in sorted(root.glob('*/')):
         vids += sorted(glob.glob(str(d / '**' / 'subject*_vid.avi'), recursive=True))

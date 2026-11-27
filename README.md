@@ -23,7 +23,8 @@
 | `bootstrap.py` | 第 0 格的引擎：挂 Drive / 判新 VM / 装依赖打补丁 / 载凭据 / 备数据 |
 | `config/<name>.toml` | 每个项目的声明：上游仓库、依赖探针、数据集清单 |
 | `projects/<name>/hooks.py` | 项目特有逻辑（老 requirements、源码补丁、数据视图） |
-| `projects/_template/00_template.ipynb` | 新 notebook 的起点（第 0 格固定 + 业务格占位） |
+| `projects/<name>/<name>.ipynb` | 一个项目只有**一个** notebook（第 0 格固定 + 业务格） |
+| `projects/_template/` | 新项目的起点，`scripts/new-project.sh` 复制它 |
 | `scripts/sessions.py` | 列/停/保活/**释放** session（含 VS Code 占用的孤儿） |
 
 ## 为什么这样组织
@@ -43,7 +44,7 @@
 ./scripts/colab_up.sh t4 --gpu T4
 
 # 3. 跑 notebook（自动把输出收进 runs/ 并抽出 traceback）
-./scripts/colab_run_nb.sh projects/myproject/01_experiment.ipynb t4
+./scripts/colab_run_nb.sh projects/myproject/myproject.ipynb t4
 
 # 4. 收工
 colab stop -s t4
@@ -61,11 +62,24 @@ colab usage                        # 看 compute unit 与 usage rate
 
 ```
 AGENTS.md                agent 必读的全局规则（Pi / Codex / opencode 共用）
-projects/_template/      新项目模板
-projects/<name>/         你的项目
+bootstrap.py             第 0 格的引擎（唯一会写 Drive 的代码）
+config/<name>.toml       每个项目的声明：上游仓库 / 依赖探针 / 数据集清单
+projects/_template/      新项目模板（template.ipynb + hooks.py + README.md）
+projects/<name>/         你的项目：<name>.ipynb + hooks.py
+archive/legacy/          历史 notebook，留着备查，不参与工作流
 runs/                    执行输出（git 忽略）
 scripts/                 colab_up.sh / colab_run_nb.sh / sessions.py / nb_errors.py / new-project.sh
 ```
+
+## Drive 上只有三个区
+
+| 区 | 装什么 | 谁写 |
+|---|---|---|
+| `Colab_Projects/cache/` | Kaggle / HF 下载的原始数据，目录名 = 来源 + 标识 | 只有 `bootstrap.py` |
+| `Colab_Projects/projects/<name>/` | 你的 logs / outputs | 你和 agent，走 `ctx.paths.*` |
+| `Colab_Projects/_secrets/` | 三个密钥文件 | 只有你手填 |
+
+不在 Drive 别处建目录；`MyDrive/Colab Notebooks/` 是 Colab 自带的，删了会被重建，不用管。
 
 ## session 预览与清理
 

@@ -1,0 +1,30 @@
+# 项目配置模板：复制成 config/<name>.toml，把 <...> 换成真值。
+# 这个文件进 git，**不允许**出现任何密钥。
+
+[project]
+name      = "<项目名>"
+# 上游代码仓库（可留空 = 这个项目没有上游代码，只用你自己的 notebook）
+repo_url  = "https://github.com/<owner>/<repo>.git"
+repo_name = "<repo>"
+
+# ---------------------------------------------------------------- 依赖探针
+# 只写两类包，否则探针恒真 = 等于没探：
+#   1) Colab 镜像里没有的
+#   2) 版本敏感的（值写期望版本前缀，如 "4.10"）
+[deps]
+# yacs = ""
+
+# ---------------------------------------------------------------- 数据
+# 落点：Colab_Projects/cache/kaggle/<owner>__<dataset>
+# check = 就绪判据的 glob（命中 0 个文件就算没就绪，会重下）
+# [[data]]
+# source = "kaggle"
+# slug   = "<owner>/<dataset>"
+# check  = "**/*.avi"
+#
+# HF 数据集：落点 cache/huggingface/<repo_type>/<org>__<name>@<rev>
+# [[data]]
+# source    = "hf"
+# repo      = "<org>/<name>"
+# revision  = "main"
+# repo_type = "dataset"

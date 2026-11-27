@@ -43,7 +43,7 @@
 【执行环】分钟级，远端，可能被回收
   VS Code 点运行 ──▶ Colab VM ──git clone──▶ /content/rPPG-Toolbox
                         │
-                        ├── 读数据 ◀── Drive (_data)
+                        ├── 读数据 ◀── Drive (cache)
                         └── 写产物 ──▶ Drive (projects/<name>/outputs)
 ```
 
@@ -63,23 +63,36 @@
 ## 3. Drive 目录地图（只在这里建目录）
 
 ```
-MyDrive/Colab_Projects/
-├── _secrets/
-│   └── secrets.toml              ← HF token / Kaggle key（不进 git）
-├── _data/                        ← bootstrap 自动管理，你不用手建
-│   ├── kaggle/<owner>__<slug>@<tag>/
-│   │   └── .manifest.json        ← 判"已就绪"的唯一依据
-│   ├── hf/<org>__<repo>@<sha>/
-│   └── registry.jsonl            ← 每次下载追加一行（谁、何时、多少文件）
-└── projects/
-    └── rppg/
-        ├── logs/                 ← 运行日志（appendix）
-        └── outputs/              ← 模型、图表、csv（要留的东西）
+MyDrive/Colab_Projects/                 ← 唯一的工作根。别在 Drive 别处建目录
+├── _secrets/                           ← 凭据。只有这一个地方有密钥
+│   ├── secrets.toml
+│   ├── kaggle.json
+│   └── huggingface_token.txt
+├── cache/                              ← 【区 1】外面下载来的原件。和项目无关
+│   ├── kaggle/<owner>__<dataset>[@<ver>]/
+│   │   ├── SOURCE.txt                  ← 人眼看的：从哪个 URL、什么时候下的
+│   │   ├── .manifest.json              ← 机器看的：判"已就绪"的唯一依据
+│   │   └── subject01_vid.avi ...
+│   ├── huggingface/<dataset|model>/<org>__<name>[@<rev>]/
+│   └── registry.jsonl                  ← 每次下载追加一行（谁、何时、多少文件）
+└── projects/<name>/                    ← 【区 2】你的产物。不可重建，别乱删
+    ├── logs/                           ← 运行日志
+    └── outputs/                        ← 模型、图表、csv
 ```
 
-**规则：只往 `_data`（由 bootstrap 管）和 `projects/<name>/{logs,outputs}`（你/agent 管）里写。别在 Drive 根目录乱建。**
+### 三个区，永不混用
 
-> 历史遗留：`MyDrive/rppg_project/` 是旧版本布局，确认 `Colab_Projects/` 跑通后可以整个删掉。
+| 区 | 装什么 | 能重建吗 | 谁写 |
+|---|---|---|---|
+| `cache/` | Kaggle / HF 下载的原始数据 | 能（但很贵：这套 rPPG 要 30 GB 下载 + 半小时上传） | 只有 `bootstrap.py` |
+| `projects/<name>/` | 你的日志、模型、图、csv | **不能** | 你 / agent，通过 `ctx.paths.logs`、`ctx.paths.outputs` |
+| `_secrets/` | 三个密钥文件 | 不能（要去官网重发） | 只有你，手填 |
+
+**命名规则**：数据集目录名就是"来源 + 标识"——
+`kaggle/maleehanasirkhan__ubfc-rppg-part1`、`huggingface/dataset/OpenRPPG__UBFC@main`。
+一看就知道是从哪下的，且永远不会和 `projects/` 混在一起。
+
+> `MyDrive/Colab Notebooks/` 是 Colab 的默认目录，删了它会被自动重建，不用管它。
 
 ---
 
@@ -185,7 +198,7 @@ manifest 存在 且 count 达标  →  跳过，0 次网络请求
 否则                          →  直接下载进 Drive → 写 manifest + 追加 registry.jsonl
 ```
 
-**数据落点（硬规则，别改）**：数据集**只进 Google Drive**，`Colab_Projects/_data/kaggle/<owner>__<slug>`，
+**数据落点（硬规则，别改）**：数据集**只进 Google Drive**，`Colab_Projects/cache/kaggle/<owner>__<dataset>`，
 `/content` 上不留任何数据集文件。
 
 实现方式（因为 Drive 的 FUSE **不支持符号链接**，两个官方通道的默认缓存模式都会建软链、必然失败）：
@@ -200,7 +213,7 @@ manifest 存在 且 count 达标  →  跳过，0 次网络请求
 
 **核验**：
 ```bash
-cat "/Users/huguoqing/Library/CloudStorage/GoogleDrive-*/My Drive/Colab_Projects/_data/registry.jsonl"
+cat "/Users/huguoqing/Library/CloudStorage/GoogleDrive-*/我的云端硬盘/Colab_Projects/cache/registry.jsonl"
 ```
 
 ---
@@ -297,7 +310,7 @@ ctx = setup("PROJECT_NAME")   # ← 只改这一行
 | 上游项目代码 | ❌ | ✅ 上游 | ✅ clone 到 `/content` | ❌ **不要** |
 | 数据集 | ❌ | ❌ | 只读（软链视图） | ✅ 唯一副本 |
 | 产物 / 日志 | ❌ | ❌ | 写到 Drive | ✅ |
-| 凭据 | ❌ | ❌ | 内存 + `~/.kaggle` | ✅ `_secrets` |
+| 凭据 | ❌ | ❌ | 只在内存（环境变量） | ✅ `_secrets` |
 
 ---
 

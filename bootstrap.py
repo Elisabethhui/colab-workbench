@@ -39,6 +39,9 @@ VMLOCAL = Path(os.environ.get("WB_VMLOCAL", "/content"))      # 本地盘：随 
 DRIVE_ROOT = Path(os.environ.get("WB_DRIVE_ROOT", "/content/drive/MyDrive"))
 SENTINEL_DIR = VMLOCAL / ".wb"
 CACHE_DIR = VMLOCAL / "_cache"                   # 只放暂存/杂项，绝不放数据集
+DRIVE_SUB = "Colab_Projects"                     # Drive 上唯一的工作根，别在别处建目录
+CACHE_ROOT = DRIVE_ROOT / DRIVE_SUB / "cache"    # 外部数据原件（kaggle/hf 下来什么就长什么样）
+PROJECTS_ROOT = DRIVE_ROOT / DRIVE_SUB / "projects"   # 项目产物（logs/outputs）
 WB_HOME = Path(__file__).resolve().parent                       # 工作流仓库根
 
 INTERACTIVE = sys.stdin.isatty() or bool(os.environ.get("WB_INTERACTIVE"))
@@ -98,18 +101,29 @@ def _py_version_of(pkg: str) -> str:
 # ------------------------------------------------------------------ 上下文
 @dataclass
 class Paths:
+    """Drive 三区 + VM 两区。语义固定，不要混用：
+    datasets = Drive/cache      外部数据原件（重建很贵，但和项目无关）
+    project  = Drive/projects   本项目产物（不可重建，logs/outputs 在这下面）
+    repo     = VM 本地盘         上游代码，每次 clone，永不进 Drive
+    vmcache  = VM 本地盘         临时暂存（压缩包等），跑完就清
+    """
     project: Path
-    data: Path
+    datasets: Path
     logs: Path
     outputs: Path
     repo: Path
-    cache: Path
+    vmcache: Path
     drive_root: Path
+
+    @property
+    def data(self) -> Path:
+        """旧名字的别名（兼容早期 notebook / hooks）。"""
+        return self.datasets
 
     def show(self) -> None:
         print("  路径：")
-        for k in ("repo", "data", "logs", "outputs", "cache"):
-            print(f"    {k:8s} {getattr(self, k)}")
+        for k in ("repo", "datasets", "logs", "outputs", "vmcache"):
+            print(f"    {k:9s} {getattr(self, k)}")
 
 
 @dataclass
@@ -292,7 +306,7 @@ def apply_patches(ctx: "Ctx", hooks: Any) -> None:
 
 
 # ------------------------------------------------------------------ 6. 凭据
-SECRETS_DIR = DRIVE_ROOT / "Colab_Projects" / "_secrets"   # 三个手填文件都在这
+SECRETS_DIR = DRIVE_ROOT / DRIVE_SUB / "_secrets"   # 三个手填文件都在这
 SECRET_CANDIDATES = [
     ("Drive", SECRETS_DIR / "secrets.toml"),
     ("workspace", WB_HOME / "_secrets" / "secrets.toml"),
@@ -392,16 +406,32 @@ def _data_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _data_dir(root: Path, spec: Dict[str, Any]) -> Path:
+    """规范化数据集目录，规则只有两条，看一眼就知道是哪来的：
+
+        kaggle → <cache>/kaggle/<owner>__<dataset>[@<version>]
+        hf     → <cache>/huggingface/<dataset|model|space>/<org>__<name>[@<rev>]
+
+    "/" 换成 "__" 是为了不造出不存在的中间层级（Drive 上更好认）。
+    """
     src = spec.get("source", "local")
+    rev = spec.get("tag") or spec.get("revision") or ""
+    rev = f"@{rev}" if rev else ""
     if src == "kaggle":
-        tag = str(spec.get("slug", "dataset")).replace("/", "__")
-    elif src == "hf":
-        tag = str(spec.get("repo", "dataset")).replace("/", "__")
-    else:
-        tag = spec.get("name", "data")
-    if spec.get("tag"):
-        tag = f"{tag}@{spec['tag']}"
-    return root / src / tag
+        return root / "kaggle" / (str(spec.get("slug", "dataset")).replace("/", "__") + rev)
+    if src == "hf":
+        kind = str(spec.get("repo_type", "dataset"))
+        return root / "huggingface" / kind / (str(spec.get("repo", "dataset")).replace("/", "__") + rev)
+    return root / src / (str(spec.get("name", "data")) + rev)
+
+
+def _source_url(spec: Dict[str, Any]) -> str:
+    src = spec.get("source")
+    if src == "kaggle":
+        return f"https://www.kaggle.com/datasets/{spec.get('slug')}"
+    if src == "hf":
+        kind = str(spec.get("repo_type", "dataset"))
+        return f"https://huggingface.co/{kind}s/{spec.get('repo')}"
+    return "-"
 
 
 def _manifest_ok(d: Path, spec: Dict[str, Any]) -> bool:
@@ -436,7 +466,7 @@ def _nfiles(d: Path) -> int:
     return sum(1 for p in d.rglob("*") if p.is_file() and p.name != ".manifest.json")
 
 
-def _write_manifest(d: Path, spec: Dict[str, Any]) -> bool:
+def _write_manifest(d: Path, spec: Dict[str, Any], registry: Optional[Path] = None) -> bool:
     """只有真的落地了文件才写 manifest。返回是否写入。"""
     files = _nfiles(d)
     if files == 0:
@@ -452,9 +482,20 @@ def _write_manifest(d: Path, spec: Dict[str, Any]) -> bool:
         "count": spec.get("count"),
     }
     (d / ".manifest.json").write_text(json.dumps(entry, ensure_ascii=False, indent=2))
-    reg = d.parent.parent / "registry.jsonl"
-    with reg.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    # 人眼可读的来源说明：在 Drive 网页里点开目录就知道这是从哪下的
+    (d / "SOURCE.txt").write_text(
+        "下载来源（bootstrap 自动生成，不用手改）\n"
+        f"source   : {entry['source']}\n"
+        f"id       : {entry['id']}\n"
+        f"url      : {_source_url(spec)}\n"
+        f"下载时间 : {entry['fetched_at']}\n"
+        f"文件数   : {files}\n"
+        f"就绪判据 : {entry['check'] or '-'}\n",
+        encoding="utf-8",
+    )
+    if registry:
+        with registry.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True
 
 
@@ -551,7 +592,8 @@ def prepare_data(cfg: Dict[str, Any], ctx: "Ctx", hooks: Any) -> None:
         if hooks and hasattr(hooks, "prepare"):
             hooks.prepare(ctx)
         return
-    need_download = [s for s in specs if not _manifest_ok(_data_dir(ctx.paths.data, s), s)]
+    registry = ctx.paths.datasets / "registry.jsonl"
+    need_download = [s for s in specs if not _manifest_ok(_data_dir(ctx.paths.datasets, s), s)]
     if not need_download:
         print(f"  数据          {len(specs)} 个数据集已在 Drive 就绪（0 次网络请求）")
         if hooks and hasattr(hooks, "prepare"):
@@ -559,12 +601,12 @@ def prepare_data(cfg: Dict[str, Any], ctx: "Ctx", hooks: Any) -> None:
         return
     failed = []
     for spec in need_download:
-        d = _data_dir(ctx.paths.data, spec)
+        d = _data_dir(ctx.paths.datasets, spec)
         name = f"{spec.get('source')}:{spec.get('slug') or spec.get('repo')}"
         print(f"  数据          下载 {name} → {d}")
         ok = False
         try:
-            ok = fetch_data(spec, d) and _write_manifest(d, spec)
+            ok = fetch_data(spec, d) and _write_manifest(d, spec, registry)
         except Exception as exc:  # noqa: BLE001
             print(f"                 ✗ 异常 {type(exc).__name__}: {str(exc)[:300]}")
         if ok:
@@ -572,9 +614,9 @@ def prepare_data(cfg: Dict[str, Any], ctx: "Ctx", hooks: Any) -> None:
         else:
             failed.append(name)
     for spec in specs:  # 只给"真有文件但没有 manifest"的目录补 manifest
-        d = _data_dir(ctx.paths.data, spec)
+        d = _data_dir(ctx.paths.datasets, spec)
         if d.exists() and not (d / ".manifest.json").exists() and _nfiles(d) > 0:
-            _write_manifest(d, spec)
+            _write_manifest(d, spec, registry)
 
     if failed:
         print(f"  ⚠ 数据        {len(failed)} 个数据集未就绪：{', '.join(failed)}")
@@ -606,17 +648,17 @@ def setup(project: str,
     print(f"  这台机器      {'新 VM（本地盘是空的）' if fresh else '旧 VM（哨兵存在）'}")
 
     # 3) 路径
-    drive_proj = DRIVE_ROOT / "Colab_Projects" / project
+    drive_proj = PROJECTS_ROOT / project
     paths = Paths(
         project=drive_proj,
-        data=DRIVE_ROOT / "Colab_Projects" / "_data",
+        datasets=CACHE_ROOT,
         logs=drive_proj / "logs",
         outputs=drive_proj / "outputs",
         repo=VMLOCAL / (proj_cfg.get("repo_name") or proj_cfg.get("name") or project),
-        cache=CACHE_DIR,
+        vmcache=CACHE_DIR,
         drive_root=DRIVE_ROOT,
     )
-    for p in (paths.project, paths.data, paths.logs, paths.outputs, paths.cache):
+    for p in (paths.project, paths.datasets, paths.logs, paths.outputs, paths.vmcache):
         p.mkdir(parents=True, exist_ok=True)
     paths.show()
 

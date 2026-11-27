@@ -20,7 +20,7 @@ opencv-python-headless = "4.10"
 # commands = ["python -m pip install -q -e ."]
 
 # ---------------------------------------------------------------- 数据
-# 数据一律落 Google Drive：Colab_Projects/_data/kaggle/<owner>__<slug>
+# 数据一律落 Google Drive：Colab_Projects/cache/kaggle/<owner>__<dataset>
 # 不在 /content 留存（只有解压时的临时包会短暂停留，跑完自动清）
 # check = 就绪判据的 glob；只判 manifest 存在 + 文件数达标
 
@@ -35,8 +35,9 @@ slug   = "maleehanasirkhan/ubfc-rppg-part2"
 check  = "**/subject*_vid.avi"
 
 # 小数据也可以走 HF，同样直落 Drive：
+# 目录会是 cache/huggingface/<repo_type>/<org>__<name>@<revision>
 # [[data]]
 # source    = "hf"
 # repo      = "your-name/ubfc-processed"
-# revision  = ""
+# revision  = "main"
 # repo_type = "dataset"
