@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 import os
 import re
 import shutil
@@ -130,21 +131,52 @@ class Ctx:
 
 
 # ------------------------------------------------------------------ 1. Drive
+def _drive_mounted() -> bool:
+    """真挂载判定：/content/drive 必须是 FUSE 挂载点。
+
+    为什么不用 "MyDrive 目录存在"：目录不存在时 mkdir 也会成功，
+    于是 Drive 没挂上时程序会安静地把数据写进本地盘（曾经的 bug）。
+    本地开发用 WB_SKIP_DRIVE=1 显式绕过。
+    """
+    if os.environ.get("WB_SKIP_DRIVE"):
+        return DRIVE_ROOT.is_dir()
+    for _ in range(1):
+        if os.path.ismount(DRIVE_ROOT.parent) or os.path.ismount(DRIVE_ROOT):
+            return True
+    return False
+
+
 def mount_drive() -> bool:
-    if (DRIVE_ROOT / ".").exists() and (DRIVE_ROOT).is_dir():
+    """挂不上就**硬失败**，绝不退化成"写本地盘"。"""
+    if _drive_mounted():
         print("  Drive         已挂载（跳过）")
         return True
+
     if os.environ.get("WB_SKIP_DRIVE"):
-        print("  Drive         跳过（WB_SKIP_DRIVE=1）")
-        return False
+        print("  Drive         跳过（WB_SKIP_DRIVE=1，仅本地开发）")
+        DRIVE_ROOT.mkdir(parents=True, exist_ok=True)
+        return True
+
     if not INTERACTIVE:
-        print("  Drive         ✗ 未挂载，且当前不是交互环境")
-        print("                先手动执行: colab drivemount -s <session>")
-        print("                或在 VS Code 里点运行这一格（会弹授权）")
-        return False
+        raise RuntimeError(
+            "Drive 未挂载，且当前不是交互环境（CLI exec 无法弹授权）。\n"
+            "  二选一：\n"
+            "    1) 在 VS Code 里点运行这一格（会弹一次授权）\n"
+            "    2) 先执行: colab drivemount -s <session>\n"
+            "  拒绝继续：否则数据会静默落进 Colab 本地盘，这是明确禁止的。"
+        )
+
     print("  Drive         挂载中（浏览器会弹一次授权）...")
     from google.colab import drive  # noqa: PLC0415  (只在 Colab 里存在)
     drive.mount("/content/drive")
+
+    for _ in range(20):  # FUSE 挂载有几百毫秒延迟
+        if _drive_mounted():
+            break
+        time.sleep(0.25)
+    if not _drive_mounted():
+        raise RuntimeError("drive.mount() 返回了，但 /content/drive 仍不是挂载点，拒绝继续")
+    print("  Drive         已挂载")
     return True
 
 
@@ -541,7 +573,7 @@ def setup(project: str,
     cfg = load_config(project, Path(config_dir) if config_dir else None)
     proj_cfg = cfg.get("project") or {}
 
-    # 1) Drive
+    # 1) Drive —— 挂不上直接抛错，不允许退化成写本地盘
     mount_drive()
 
     # 2) 哨兵
