@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,8 +181,13 @@ def _can_prompt() -> bool:
     return bool(getattr(kernel, "_allow_stdin", False))
 
 
-def mount_drive() -> bool:
-    """挂不上就**硬失败**，绝不退化成"写本地盘"。"""
+def mount_drive(timeout: float = 90.0) -> bool:
+    """挂不上就**硬失败**，绝不退化成"写本地盘"。
+
+    带看门狗：drive.mount() 在某些前端下会**静默干等**授权，永不返回，
+    把内核占死（之后点任何单元格都只转圈、没有任何输出）。
+    所以放到后台线程里等，超时就抛错并给出替代做法。
+    """
     if _drive_mounted():
         print("  Drive         已挂载（跳过）")
         return True
@@ -194,10 +200,8 @@ def mount_drive() -> bool:
     if not _can_prompt():
         raise RuntimeError(
             "Drive 未挂载，而当前通道弹不出 Google 授权（allow_stdin=False）。\n"
-            "  colab exec / 脚本 / VS Code 里的「命令行执行」都属于这种；二选一：\n"
-            "    1) 在 VS Code 的 notebook 里点运行这一格 —— 会弹授权窗，点允许即可\n"
-            "    2) 先在这个 session 上手动执行: colab drivemount -s <session>\n"
-            "  拒绝继续：否则数据会静默落进 Colab 本地盘，这是明确禁止的。"
+            "  colab exec / 脚本 / VS Code 里的「命令行执行」都属于这种。\n"
+            "  改用：VS Code 命令面板 → Mount Google Drive to Server... → 授权完成后重跑本格。"
         )
 
     print("  Drive         挂载中（会自动弹一次 Google 授权）...")
@@ -210,7 +214,43 @@ def mount_drive() -> bool:
         ) from None
 
     mountpoint = DRIVE_ROOT.parent if DRIVE_ROOT.name == "MyDrive" else DRIVE_ROOT
-    drive.mount(str(mountpoint))
+
+    box: dict = {}
+
+    def _worker() -> None:
+        try:
+            drive.mount(str(mountpoint))
+            box["done"] = True
+        except BaseException as exc:  # noqa: BLE001
+            box["err"] = exc
+
+    worker = threading.Thread(target=_worker, name="drive-mount", daemon=True)
+    worker.start()
+
+    waited = 0.0
+    hinted: set[int] = set()
+    while worker.is_alive() and waited < timeout:
+        worker.join(2.0)
+        waited += 2.0
+        for mark, msg in (
+            (10, "如果没看到授权窗：命令面板 → Mount Google Drive to Server..."),
+            (30, "还没等到授权。可以取消本格，用上面的菜单挂载后再重跑（幂等）"),
+            (60, "仍在等。看门狗会在 %ds 处放弃本格，不会把内核占死" % int(timeout)),
+        ):
+            if waited >= mark and mark not in hinted:
+                hinted.add(mark)
+                print(f"       {msg}", flush=True)
+
+    if worker.is_alive():
+        raise RuntimeError(
+            f"drive.mount() 超过 {int(timeout)}s 没有返回，已放弃本格（后台线程仍在，但不再阻塞内核）。\n"
+            "  这是已知问题：某些前端下 drive.mount 会静默干等授权。改走这两条之一：\n"
+            "    1) 命令面板执行 Mount Google Drive to Server... → 授权完成后**重跑本格**\n"
+            "    2) 在 Colab 网页版里挂载，再回 VS Code 跑本格\n"
+            "  重跑是安全的：本格幂等，挂上了会直接打印「已挂载（跳过）」。"
+        )
+    if "err" in box:
+        raise RuntimeError(f"drive.mount() 失败：{type(box['err']).__name__}: {box['err']}") from None
 
     for _ in range(20):  # FUSE 挂载有几百毫秒延迟
         if _drive_mounted():
