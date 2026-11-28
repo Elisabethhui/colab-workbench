@@ -5,6 +5,19 @@
 
 `projects/rppg/` 只是第一个已验证端到端的项目，**不要**把它的路径、字段、业务逻辑写进本文件或脚本里。
 
+## 和人协作的方式：先说计划，再动手，边做边报
+
+用户明确要求的两条：**看懂了才批准**，**执行中要能看到进度**。
+
+1. **动手前先给计划**：目标、要改哪些文件、几步、有没有风险（花钱、动数据、碰摄像头/麦克风）。
+   等用户明确同意再执行。用户没点头就只做只读检查。
+2. **执行中每完成一步报一行**，格式固定：`[2/5] 改 X — 完成 / 证据：<命令输出或文件路径> / 下一步：Y`。
+   不带证据的"完成了"不算完成。
+3. **卡住立刻停**：说明卡在哪、需要用户做什么决定，不要自己换个做法继续。
+4. **收尾给一张表**：完成的、没做的、为什么没做。
+5. **摄像头/麦克风/个人数据**：一律先申请，得到同意才碰；临时产物用完就删，并告知用户删了什么。
+6. 说话**简短直白**，别堆术语和长清单。
+
 ## 目录约定
 
 ```
@@ -39,6 +52,9 @@ scripts/sessions.py keepalive <name> --interval 300   # 保活（免费档慎用
 
 scripts/colab_up.sh <session> [--gpu T4]        # 确保 session 存在（幂等）
 scripts/colab_run_nb.sh projects/<name>/x.ipynb [session]   # 跑 notebook + 抽错误
+
+scripts/colab_run.sh -s <session> -f <脚本或notebook> [--max-wait 1800]  # 上传+执行，跑完立刻返回
+scripts/wait_log.sh <日志> [--pid PID] [--max-wait 600]                 # 轮询单个日志，结束就返回
 ```
 
 脚本内部等价于：
@@ -52,6 +68,29 @@ colab exec -s <session> -f <notebook> # 逐格执行，遇首个非零 cell 停�
 - 交互命令**只能由人执行**：`colab repl`、不带 `-- CMD` 的 `colab ssh`、`colab auth`、`colab drivemount`
 - shell 命令用一次性形式：`colab ssh -s <session> -- <cmd>`，或 `echo '!<cmd>' | colab exec -s <session>`
 - 用完必须 `colab stop -s <session>`；空闲的 GPU 会烧掉每日免费时长
+
+## 执行的时间成本（血泪教训，必须有意识地防）
+
+实测数据（2026-11-28，一个 32 小时的会话）：**工具等待 277 分钟，其中 267 分钟是 68 次超过 60 秒的等待**，
+而模型本身每轮只要 2–17 秒。慢的从来不是模型，是等待方式。四条硬规则：
+
+1. **禁止 `nohup colab exec ... & sleep 300; grep 日志`。**
+   远端多半 1–5 秒就结束了（常常还是秒失败），却被固定罚站 5 分钟。
+   改用 `scripts/colab_run.sh -s <session> -f <file>`：上传 → 后台执行 → 轮询进程，**一结束立刻返回并打印 traceback**。
+   已经手工起过的后台任务，用 `scripts/wait_log.sh <日志> --pid <pid>` 等，不要睡固定时长。
+2. **秒级能抓到的错不要上远端。** `NameError` / `AttributeError` / 拼错的变量名这类，
+   先在本地 `exec(compile(...))` 空跑一遍（不需要装 torch，只检查到那一行为止）。
+   实测有 3 个连续迭代各花 300 秒，只为修同一个 `NameError: name 'ctx' is not defined`。
+3. **`colab auth` 只能是人工前台的一次性动作。** 一个挂在 tty 上等输入的 `colab auth`
+   会把所有账号 API（`colab sessions` / `new` / `drivemount`）拖到 **60–70 秒**甚至无响应；
+   杀掉它之后同样命令回到 **1.1–1.8 秒**。发现 auth 卡住：`ps aux | grep 'colab auth'` → `kill <pid>`。
+4. **账号 API 不放进循环重试。** `colab sessions / new / drivemount` 走 `colab.research.google.com`，
+   而 `upload / exec` 走已缓存的 runtime endpoint（快且稳）。循环里只用后者，前者一律套 `timeout 15`。
+
+配套：`scripts/colab_up.sh` 的 `session_exists` 已改成 `timeout 12 colab sessions`，超时则退回读本地
+`sessions.json`（只读）判断，不再被账号 API 卡死。
+
+判断一轮迭代是否健康：**单次工具等待 >60 秒就要问“为什么”**，并在下一步改掉等待方式，而不是重试。
 
 ## session 生命周期（必读）
 
@@ -138,5 +177,6 @@ ctx = setup("<项目名>")   # 项目名 = config/<项目名>.toml
 ```bash
 colab sessions           # 确认没有遗留的 active session
 colab stop -s <session>  # 收工前必须
+ps aux | grep 'colab auth' | grep -v grep   # 确认没有挂着的 auth 进程（会拖慢所有账号 API）
 git status               # 确认没有 runs/ 或带输出的 notebook 混进提交
 ```
