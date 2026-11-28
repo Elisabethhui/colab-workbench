@@ -48,7 +48,7 @@ prev_size=-1
 stable=0
 reason=""
 
-END_RE='Traceback \(most recent call last\)|^[[:space:]]*(Error|Exception|RuntimeError|ValueError|NameError|AttributeError|ModuleNotFoundError|ImportError|KeyboardInterrupt|OutOfMemoryError)[: ]|^\['"'"'[0-9]+'"'"'\]|完成|DONE|OK$|OOM|Killed'
+END_RE='Traceback \(most recent call last\)|^[[:space:]]*(Error|Exception|RuntimeError|ValueError|NameError|AttributeError|ModuleNotFoundError|ImportError|KeyboardInterrupt|OutOfMemoryError)[: ]|^\['"'"'[0-9]+'"'"'\]|===== 第 [0-9]+ 格 完成|全部完成|DONE$|OOM|Killed'
 
 while :; do
   elapsed=$((SECONDS - START))

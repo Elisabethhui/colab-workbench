@@ -65,14 +65,16 @@ colab exec -s <session> -f <notebook> # 逐格执行，遇首个非零 cell 停�
 ```
 
 - **session 名必须是显式的**，不要省略（省略会生成随机 id，之后难以引用）
-- 交互命令**只能由人执行**：`colab repl`、不带 `-- CMD` 的 `colab ssh`、`colab auth`、`colab drivemount`
+- 交互命令**只能由人执行**：`colab repl`、不带 `-- CMD` 的 `colab ssh`、`colab drivemount`，
+  以及任何停在 `Enter the authorization code:` 的授权流程
 - shell 命令用一次性形式：`colab ssh -s <session> -- <cmd>`，或 `echo '!<cmd>' | colab exec -s <session>`
 - 用完必须 `colab stop -s <session>`；空闲的 GPU 会烧掉每日免费时长
 
 ## 执行的时间成本（血泪教训，必须有意识地防）
 
 实测数据（2026-11-28，一个 32 小时的会话）：**工具等待 277 分钟，其中 267 分钟是 68 次超过 60 秒的等待**，
-而模型本身每轮只要 2–17 秒。慢的从来不是模型，是等待方式。四条硬规则：
+而模型本身每轮只要 2–17 秒。慢的从来不是模型，是等待方式。六条硬规则
+（那组数字是这一次会话的遥测，只能当量级参考，不是基准）：
 
 1. **禁止 `nohup colab exec ... & sleep 300; grep 日志`。**
    远端多半 1–5 秒就结束了（常常还是秒失败），却被固定罚站 5 分钟。
@@ -81,18 +83,49 @@ colab exec -s <session> -f <notebook> # 逐格执行，遇首个非零 cell 停�
 2. **秒级能抓到的错不要上远端。** `NameError` / `AttributeError` / 拼错的变量名这类，
    先在本地 `exec(compile(...))` 空跑一遍（不需要装 torch，只检查到那一行为止）。
    实测有 3 个连续迭代各花 300 秒，只为修同一个 `NameError: name 'ctx' is not defined`。
-3. **`colab auth` 只能是人工前台的一次性动作。** 一个挂在 tty 上等输入的 `colab auth`
-   会把所有账号 API（`colab sessions` / `new` / `drivemount`）拖到 **60–70 秒**甚至无响应；
-   杀掉它之后同样命令回到 **1.1–1.8 秒**。发现 auth 卡住：`ps aux | grep 'colab auth'` → `kill <pid>`。
+3. **授权流程只能是人工前台的一次性动作。** CLI 没有 `colab auth` 这类独立子命令：令牌失效时，
+   任何一条命令自己会打印授权链接并停在 `Enter the authorization code:` 等输入。
+   一个挂在 tty 上等输入的这类进程会把所有账号 API（`colab sessions` / `new` / `drivemount`）
+   拖到 **60–70 秒**甚至无响应；杀掉之后同样命令回到 **1.1–1.8 秒**。
+   发现卡住：`ps aux | grep colab` → `kill <pid>`。
 4. **账号 API 不放进循环重试。** `colab sessions / new / drivemount` 走 `colab.research.google.com`，
    而 `upload / exec` 走已缓存的 runtime endpoint（快且稳）。循环里只用后者，前者一律套 `timeout 15`。
+5. **数值等价性先拿 1 个真实样本，通过再放开全量。** 用合成图/理想输入做的对照会掩盖边界情况：
+   实测用合成图判「ffmpeg 裁剪 ≈ cv2 裁剪」（差 0.3 灰阶），但真实数据里人脸框会被放大到越界
+   （`y + bh = 492 > 480`），numpy 切片与 ffmpeg 的越界语义不同 → 真实差 **18.5 灰阶**，
+   42 个视频白跑 893 秒才发现。规则：**先挑 1 条真实样本做像素级对照，再全量**。
+6. **失败后先问「是不是同一个原因」。** 连着三次修同一个 `NameError`/`AttributeError`，
+   说明缺的是上游检查（见第 2 条），不是再试一次。
 
 配套：`scripts/colab_up.sh` 的 `session_exists` 已改成 `timeout 12 colab sessions`，超时则退回读本地
 `sessions.json`（只读）判断，不再被账号 API 卡死。
 
 判断一轮迭代是否健康：**单次工具等待 >60 秒就要问“为什么”**，并在下一步改掉等待方式，而不是重试。
 
+## 缓存与数值等价性（钱和时间都烧在这）
+
+1. **缓存旁边必须有可机读的元数据**：分块长度、resize、裁框系数、dtype、每个视频的 mean/std、
+   repo HEAD、生成时间。没有元数据的缓存，第二次使用时无法判断它是否还可信。
+2. **指纹里必须带预处理代码版本号**：`PREPROC_VERSION = N` 参与哈希，改动裁剪/缩放逻辑就 +1。
+   实测项目里，修好越界 bug 后靠这个把旧缓存自动作废（指纹 `f6b37f0d2822` → `648c31d15021`）；
+   否则「代码修好了但还在读旧缓存」是最难查的一类问题。
+3. **指纹只由数据内容与参数决定**，与 session/VM/时间无关：同样的数据必须得到同一个指纹，
+   换台机器、换个人跑，只要指纹相同就应命中同一份缓存。
+4. 缓存落 Drive 前先量体积：本项目实测 **78.3 GB 原始视频 → 1.23 GB 缓存**（uint8 + mean/std，
+   与上游 float64 逐位等价），新 VM 从零到可推理 = 下载 9.5 秒 + 解包 30.6 秒。
+
 ## session 生命周期（必读）
+
+### 多 agent 共存：只碰自己的 session
+
+`~/.config/colab-cli/sessions.json` 是**按操作系统用户共享的，不按工作区分**。
+同一个用户下的其他 agent（别的 harness、另一个工作区里的脚本）建的 session 会出现在同一张表里。
+
+1. **本仓库的 session 一律用 `rppg-` 前缀**（如 `rppg-cpu`、`rppg-gpu`），便于和别人的 `loop*` 等名字区分。
+2. **只 stop 自己 `colab new` 时用过的那个名字**，停之前先在 `sessions.json` 里确认有它的记录。
+   绝不按列表批量停（CLI 本来也没有 `--all`），绝不凭「看起来像我建的」下手。
+3. **每个任务收尾必须停**，并在汇报里写明停掉了哪个。空闲的 GPU 会烧掉每日免费额度。
+4. 看到不认识的名字，当别人的处理：只在汇报里列出来，不动它。
 
 - **Colab 按活动度保活。** CLI 是 fire-and-forget：`colab exec` 跑完就断开 websocket，
   随后**零连接、零活动 → 后端会回收 VM**（实测空闲不到 1 小时就没了）。
@@ -177,6 +210,6 @@ ctx = setup("<项目名>")   # 项目名 = config/<项目名>.toml
 ```bash
 colab sessions           # 确认没有遗留的 active session
 colab stop -s <session>  # 收工前必须
-ps aux | grep 'colab auth' | grep -v grep   # 确认没有挂着的 auth 进程（会拖慢所有账号 API）
+ps aux | grep colab | grep -v grep          # 确认没有挂在授权/交互输入上的进程（会拖慢所有账号 API）
 git status               # 确认没有 runs/ 或带输出的 notebook 混进提交
 ```
